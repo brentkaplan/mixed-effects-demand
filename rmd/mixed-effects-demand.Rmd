@@ -1,0 +1,1910 @@
+---
+title: "Applying Mixed-Effects Modeling to Behavioral Economic Demand: An Introduction"
+author:
+- name: Brent A. Kaplan
+  affiliation: '1'
+  corresponding: yes
+  address: 2195 Harrodburg Rd. Suite 125, Lexington, KY 40504
+  email: brentkaplan@uky.edu
+- name: Christopher T. Franck
+  affiliation: '2'
+  corresponding: no
+  address: 250 Drillfield Drive, Blacksburg, VA 24061
+  email: chfranck@vt.edu
+- name: Kevin McKee
+  affiliation: '2'
+  corresponding: no
+  address: 250 Drillfield Drive, Blacksburg, VA 24061
+  email: kmckee90@gmail.com
+- name: Shawn P. Gilroy
+  affiliation: '3'
+  corresponding: no
+  address: 226 Audubon Hall, Baton Rouge, LA 70802
+  email: sgilroy1@lsu.edu
+- name: Mikhail N. Koffarnus
+  affiliation: '1'
+  corresponding: no
+  address: 2195 Harrodburg Rd. Suite 125, Lexington, KY 40504
+  email: koffarnus@uku.edu
+shorttitle: Demand
+output:
+  papaja::apa6_docx: default
+  papaja::apa6_pdf: default
+authornote: |
+  Author Note
+abstract: "Behavioral economic demand methodology is increasingly being used in various fields such as substance use and consumer behavior analysis. Traditional analytical techniques to fitting demand data have proven useful yet some of these approaches present statistical limitations and require preprocessing of data. As an extension to these regression techniques, mixed-effect (or multilevel) modeling can serve as an improvement over these traditional methods. Notable benefits include providing simultaneous group (i.e., population) level and individual level estimates and accommodating the inclusion of 'nonsystematic' response sets as well as covariates. The models can also accommodate complex experimental designs including repeated measures. The goal of this paper is to introduce the mixed-effects modeling techniques applied to behavioral economic demand data. We compare and contrast results from traditional techniques to that of the mixed-effects models differing in species and experimental design,. The relative benefits and drawbacks of both approaches are discussed and access to the statistical code is provided to support the analytical replicability of the comparisons."
+keywords: behavioral economics, demand, mixed model, operant, behavioral science, purchase task, R programming language
+bibliography: ["../bib/bibliography.bib"]
+wordcount: X
+floatsintext: no
+figurelist: no
+tablelist: no
+footnotelist: no
+linenumbers: yes
+always_allow_html: true
+csl: "apa7.csl"
+mask: no
+draft: no
+documentclass: "apa7"
+classoption: man
+affiliation:
+- id: '1'
+  institution: Department of Family and Community Medicine, University of Kentucky
+- id: '2'
+  institution: Department of Statistics, Virginia Tech
+- id: '3'
+  institution: Department of Psychology, Louisiana State University
+---
+
+```{r setup, include = FALSE}
+library("papaja")
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, cache = FALSE,
+                      comment = NA)
+set.seed(4321)
+```
+
+```{r, include = F}
+## directories
+ddir <- "../data/"
+wdir <- "../workingdata/"
+if (!dir.exists(wdir)) dir.create(wdir)
+
+## required libraries
+library(beezdemand)
+library(broom)
+library(nlme)
+library(tidyverse)
+library(emmeans)
+library(kableExtra)
+
+## functions
+
+## calculate geomeans
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+
+## generate predicted values for use with apt data
+pred <- function(q0, alpha, kval) {
+  # x <- seq(0, 200, length.out = 10000)
+  x <- c(0, 0.001 * 1.1^(0:130))
+  data.frame(predx = x, predy = 10^(q0) * 10^(kval *(exp(-10^(alpha)*10^(q0)*x)-1)))
+}
+
+## generate predicted values for use with monkey data
+pred2 <- function(q0, alpha) {
+  # x <- seq(0, 200, length.out = 10000)
+  x <- c(0, 0.1 * 1.1^(0:130))
+  data.frame(predx = x, predy = 10^(q0) * 10^(2.340616 * (exp(-10^(alpha)*10^(q0)*x)-1)))
+}
+
+## fit a single nls function for use with apt data
+nls_fit <- function(df, kval) {
+  fit <- try(nlmrt::wrapnls(y ~ 10^(q0) * 10^(kval *(exp(-10^(alpha)*10^(q0)*x)-1)),
+                    start = list(q0 = 3, alpha = -1), data = df,
+                 control = list(maxiter = 1000)), silent = T)
+  return(fit)
+}
+
+## fit a single nls function for use with monkey data data
+nls_fit2 <- function(df) {
+  q0st <- log10(max(df$y))
+  fit <- try(nlmrt::wrapnls(y ~ 10^(q0) * 10^(kval *(exp(-10^(alpha)*10^(q0)*x)-1)),
+                    start = list(q0 = q0st, alpha = -5), data = df,
+                    control = list(maxiter = 1000)), silent = T)
+  return(fit)
+}
+
+## extract coefficients from mixed model for monkey data 
+extract_coefs2 <- function(model, param = "q0") {
+  if (param == "q0") {
+    out <- coef(model) %>%
+      mutate(id = rownames(.)) %>%
+      dplyr::select(id, starts_with("q0.dr"), starts_with("q0.(I")) %>%
+      gather("drug", "q0mm", starts_with("q0.dr")) %>%
+      dplyr::select(id, drug, q0mm, `q0.(Intercept)`) %>%
+      mutate(q0mm = q0mm + `q0.(Intercept)`) %>%
+      mutate(drug = gsub("q0.drug", "", drug)) %>%
+      dplyr::select(id, drug, q0mm)
+  } else {
+    out <- coef(model) %>%
+      mutate(id = rownames(.)) %>%
+      dplyr::select(id, starts_with("alpha.dr"), starts_with("alpha.(I")) %>%
+      gather("drug", "alphamm", starts_with("alpha.dr")) %>%
+      dplyr::select(id, drug, alphamm, `alpha.(Intercept)`) %>%
+      mutate(alphamm = alphamm + `alpha.(Intercept)`) %>%
+      mutate(drug = gsub("alpha.drug", "", drug)) %>%
+      dplyr::select(id, drug, alphamm)
+  }
+  return(out)
+}
+
+```
+
+```{r regressions, message = F, include = F}
+## read apt data
+apt <- suppressWarnings(read_csv(paste0(ddir, "apt-data.csv"))[-1])
+## gender as factor
+apt$gender <- factor(apt$gender) 
+## retain complete cases
+apt <- apt[complete.cases(apt), ] 
+
+## convert to long form
+apt_long <- gather(apt, "x", "y", `0`:`20`) %>%
+  mutate(x = as.numeric(x), 
+         y = as.numeric(y),
+         id = as.factor(id)) %>%
+  arrange(id, x)
+
+## rename certain individual sets
+apt_long <- apt_long %>%
+  mutate(id = fct_recode(id, "Min Q0" = "533",
+                         "Median Q0" = "638",
+                         "Max Q0" = "498",
+                         "Min Alpha" = "335",
+                         "Median Alpha" = "964",
+                         "Max Alpha" = "406",
+                         "Nonsys\nIncrease" = "104",
+                         "Static" = "532",
+                         "Nonsys" = "955")) %>%
+  mutate(id = fct_relevel(id, 
+                           c("Min Q0",
+                             "Median Q0",
+                             "Max Q0",
+                             "Min Alpha",
+                             "Median Alpha",
+                             "Max Alpha",
+                             "Nonsys\nIncrease",
+                             "Static",
+                             "Nonsys")))
+
+## for subsetting samples later
+samps <- c("Min Q0",
+           "Median Q0",
+           "Max Q0",
+           "Min Alpha",
+           "Median Alpha",
+           "Max Alpha",
+           "Nonsys\nIncrease",
+           "Static",
+           "Nonsys")
+
+## check for unsystematic and remove all cases with less than 3 positive data points
+apt_unsys <- CheckUnsystematic(apt_long)
+apt_long <- apt_long %>%
+  dplyr::filter(!(id %in% apt_unsys$id[apt_unsys$NumPosValues < 3]))
+
+## find k value to be used as a constant in analyses
+kval <- GetK(apt_long, mnrange = T) # 1.7684
+
+## summarize data for use later
+apt_sum <- apt_long %>%
+  group_by(x) %>%
+  summarise(mn = mean(y), 
+            se = (sd(y)/sqrt(n())),
+            md = median(y),
+            gmn = gm_mean(y),
+            lwr = quantile(y, .25),
+            upr = quantile(y, .75)) %>%
+  ungroup()
+
+## obtain observed demand metrics
+apt_obs <- apt_long %>%
+  do(GetEmpirical(.)) %>%
+  ungroup()
+
+### fit to means approach
+## fit to means (pooled) approach using a constant k value
+apt_pool <- nlmrt::wrapnls(y ~ 10^(q0) * 10^(kval *(exp(-10^(alpha)*10^(q0)*x)-1)),
+                    start = list(q0 = 3, alpha = -1), data = apt_long,
+                    control = list(maxiter = 1000))
+
+## create data frame of pooled estimates
+apt_pool_df <- tidy(apt_pool) %>%
+  select(term, estimate) %>%
+  pivot_wider(names_from = "term", values_from = "estimate") %>%
+  mutate(model = "Fit to Mean",
+         preds = map2(q0, alpha, pred, kval))
+
+## create summary table for means of fixed effects
+apt_fittomeans_fixed_sum <- tidy(apt_pool) %>%
+  select(term, estimate, "std_error" = std.error) %>%
+  mutate(model = "Fit to Means")
+
+### two stage approach
+## two stage (no pool) approach retaining coefficients and predictions
+apt_nopool <- apt_long %>%
+  nest(data = c(x, y)) %>%
+  group_by(id) %>%
+  mutate(fit = map(data, nls_fit, kval),
+         tidied = map(fit, possibly(tidy, otherwise = NA_real_)),
+         glanced = map(fit, possibly(glance, otherwise = NA_real_))) %>%
+  unnest(cols = c("data")) %>%
+  filter(x %in% 0) %>%
+  unnest(cols = "tidied")
+
+## create summary data frame reflecting mean estimates and stddevs
+apt_twostage_fixed_sum <- apt_nopool %>%
+  dplyr::select(id, term, estimate, std.error) %>%
+  filter(!is.na(term)) %>% 
+  group_by(term) %>%
+  summarise(est_mn = mean(estimate),
+            stderror_mn = mean(std.error)) %>%
+  mutate(model = "Two Stage") %>%
+  arrange(desc(term)) %>%
+  rename(estimate = est_mn, std_error = stderror_mn)
+
+## create data frame of no pool estimates
+apt_nopool <- apt_nopool %>%
+  dplyr::select(id, term, estimate) %>%
+  pivot_wider(names_from = "term", values_from = "estimate") %>%
+  dplyr::select(-`NA`) %>%
+  mutate(model = "Two Stage") %>%
+  group_by(id) %>%
+  mutate(preds = map2(q0, alpha, pred, kval)) %>%
+  ungroup()
+
+### mixed model fit
+## allow correlation between alpha/q0 within id (pdSymm)
+apt_nlme <- nlme(y ~ 10^(q0) * 10^(kval *(exp(-10^(alpha)*10^(q0)*x)-1)), 
+                data = cbind(apt_long, kval),
+                fixed = list(q0 ~ 1, 
+                             alpha ~ 1),
+                random = list(pdSymm(q0 + alpha ~ 1)),
+                start = list(fixed = c(coef(apt_pool)[1],
+                                       coef(apt_pool)[2])), 
+                groups = ~id,
+                method = "ML",
+                verbose = 2,
+                control = list(msMaxIter = 5000,
+                               niterEM = 5000,
+                               maxIter = 5000,
+                               pnlsTol = .0001,
+                               tolerance = .001,
+                               apVar = T,
+                               minScale = .0000001,
+                               opt = "optim"))
+
+## extract random predictions and generate predicted values
+apt_partialpool <- coef(apt_nlme) %>%
+  rownames_to_column("id") %>%
+  mutate(model = "Mixed Model (RE)") %>%
+  group_by(id) %>%
+  mutate(preds = map2(q0, alpha, pred, kval)) %>%
+  ungroup()
+
+## extract fixed effects and generate predicted values
+apt_fixef <- as.data.frame(cbind("q0" = fixef(apt_nlme)[1], 
+                                "alpha" = fixef(apt_nlme)[2])) %>%
+  mutate(model = "Mixed Model (FE)",
+         id = 0) %>%
+  group_by(id) %>%
+  mutate(preds = map2(q0, alpha, pred, kval)) %>%
+  ungroup() %>%
+  select(-id)
+
+## create summary table for means of fixed effects 
+apt_nlme_fixed_sum <- summary(apt_nlme)$tTable[ , 1:2] %>%
+  as.data.frame() %>%
+  rownames_to_column("term") %>%
+  rename(estimate = Value, std_error = Std.Error) %>%
+  mutate(model = "Mixed Model")
+
+## create summary table for means of fixed effects 
+apt_fixed_sum <- rbind.data.frame(apt_twostage_fixed_sum, 
+                 apt_fittomeans_fixed_sum,
+                 apt_nlme_fixed_sum) %>%
+  rename(Model = model, Parameter = term, Estimate = estimate,
+         SE = std_error) %>%
+  mutate(Model = factor(Model, levels = c("Fit to Means", "Two Stage",
+                                          "Mixed Model"))) %>%
+  arrange(Parameter, Model) 
+
+## rearrange columns
+apt_fixed_sum <- apt_fixed_sum[, c("Model", "Parameter", "Estimate", "SE")]
+```
+
+# Introduction
+
+The concept of behavioral economic demand (hereafter referred to simply as demand) has 
+proven useful in a variety of settings including drug addiction 
+[@strickland2020meta; @kaplan2018aptreview; @aston2019behecon; @roz2019cptreview; 
+@strickland2020unifying; @acuff2020meta; @strickland2020meta], public 
+policy [@hursh2013public], health behaviors [@bickel2016health], and others 
+[@gilroy2018systematic; @kaplan2017greenbags; @henley2016workplace; 
+@strickland2020condom; @hayashi2019texting; @yates2019enrichment; @reed2016uvit]. 
+Demand has been evaluated in
+a both humans and nonhuman animals [@strickland2020unifying; @bentzley2012selfad; @fragale2017neg].
+Methods for elucidating trends
+in consumption and demand have included experiential self-administration 
+[@johnson2006replacing] and hypothetical responding [@strickland2020meta]. 
+
+The economic concept of demand characterizes the relationship between the 
+consumption or purchasing of a substance or commodity and some constraint, such 
+as price [@reed2013behecon]. In nonhuman animal self-administration work, demand is captured 
+by (i) increasing the ratio requirement necessary to obtain the reinforcer, 
+and/or (ii) decreasing the dose of the reinforcer while keeping the response 
+requirement constant. This ratio of cost (e.g., responses)
+to benefit (e.g., drug obtained) is referred to as unit price[^1]. In human work, 
+participants may self-administer or endorse their hypothetical consumption of the 
+reinforcers (e.g., alcoholic drinks, cigarettes) across a range of prices. This latter
+approach is commonly referred to as a Hypothetical Purchase Task [@roma2015hpts]. In 
+*behavioral economics* rooted in the operant framework, the relation
+between reinforcer price and consumption typically follows
+a nonlinear relationship, where increments in low prices are met with relatively
+little change in consumption and relatively more rapid declines in consumption are
+observed as prices increase (see Figure \@ref(fig:illustrate-demand-approaches-plot)). 
+A core aspect resulting from fitting a function to the demand curve is the rate of 
+change in elasticity,
+where elasticity is the proportional change in consumption relative to a proportional
+change in price [@gilroy2020elasticity].
+
+[^1]: Although we acknowledge the differences between consumption and purchasing and between price and unit price, for simplicity we will refer to consumption as the primary dependent variable and price as the independent variable.
+
+```{r illustrate-demand-approaches}
+## pull 5 random samples
+samples <- sample(unique(apt_long$id), 5)
+
+## subset and create summary data frame
+apt_sum_subset <- apt_long %>%
+  filter(id %in% samples) %>%
+  group_by(x) %>%
+  summarise(mn = mean(y), 
+            se = (sd(y)/sqrt(n())),
+            md = median(y),
+            gmn = gm_mean(y),
+            lwr = quantile(y, .25),
+            upr = quantile(y, .75)) %>%
+  ungroup()
+
+## fit the fit to means (pooled) model
+apt_pool_subset <- nlmrt::wrapnls(y ~ 10^(q0) * 10^(kval *(exp(-10^(alpha)*10^(q0)*x)-1)),
+                    start = list(q0 = 3, alpha = -1), data = apt_long[apt_long$id %in% samples,],
+                    control = list(maxiter = 1000))
+
+## fit the two stage approach (no pool) model
+apt_nopool_subset <- apt_long %>%
+  filter(id %in% samples) %>%
+  nest(data = c(x, y)) %>%
+  group_by(id) %>%
+  mutate(fit = map(data, nls_fit, kval),
+         tidied = map(fit, possibly(tidy, otherwise = NA_real_)),
+         glanced = map(fit, possibly(glance, otherwise = NA_real_))) %>%
+  unnest(cols = c("data")) %>%
+  filter(x %in% 0) %>%
+  unnest(cols = "tidied") %>%
+  dplyr::select(id, term, estimate) %>%
+  pivot_wider(names_from = "term", values_from = "estimate") %>%
+  # dplyr::select(-`NA`) %>%
+  # mutate(model = "One Fit Per Person",
+  #        pmax = GetAnalyticPmax(alpha, 2, q0)) %>%
+  mutate(model = "One Fit Per Person") %>%
+  group_by(id) %>%
+  mutate(preds = map2(q0, alpha, pred, kval)) %>%
+  ungroup()
+
+## data frame of predictions for subset
+apt_pool_preds_subset <- pred(coef(apt_pool_subset)[1], 
+                              coef(apt_pool_subset)[2], kval)
+
+apt_nopool_preds_subset <- apt_nopool_subset %>%
+                    ungroup() %>%
+                    unnest(cols = "preds") %>%
+                    dplyr::filter(predx > 0)
+```
+
+```{r illustrate-demand-approaches-plot, results = 'asis', fig.cap = "Two common nonlinear regression methods. Subset of Alcohol Purchase Task data from Kaplan and Reed (2018). Top panel: Individual points in gray and mean values in black. The black line shows the best fit line using the fit-to-means approach. Notice that only one curve is generated for the entire sample, even though there are many individual points that fall above and below the mean points. Bottom panel: The same individual points in gray as the top panel, now illustrating the first stage of the two-stage approach where one regression line is fit for each participant.", fig.height = 7, fig.width = 5}
+## use symbols
+
+shps <- c("476" = 21, "208" = 22, "378" = 23, 
+          "918" = 24, "986" = 25)
+
+p1 <- apt_pool_preds_subset %>%
+  dplyr::filter(predx > 0) %>%
+  ggplot(aes(x = predx, y = predy, color = id)) +
+  # geom_linerange(aes(x = x, y = -1, ymin = lwr, ymax = upr),
+  #               data = apt_sum[apt_sum$x > 0, ], size = 1.2) +
+  geom_point(aes(x = x, y = y, color = id, shape = id), 
+             data = apt_long[apt_long$id %in% samples & apt_long$x > 0,],
+             size = 2, 
+             stroke = .5,
+             fill = alpha("white", .5)) +
+  geom_line(color = "gray10", size = .75) +
+  geom_point(aes(x = x, y = mn), data = apt_sum_subset[apt_sum_subset$x > 0,],
+             shape = 21, color = "black", alpha = 1, 
+             size = 2, stroke = 1, fill = "black") +
+  scale_shape_manual(values = shps) +
+  # coord_trans(x = "log10", xlim = c(.5, 20),
+  #             ylim = c(0, 10)) +
+  scale_x_log10(breaks = c(0.25, 0.5, 1, 5, 10),
+                labels = c("0.25", "0.50", "1", "5", "10"),
+                limits = c(.2, 30)) +
+  scale_y_continuous(expand = c(.03,0), limits = c(0, 10)) +
+  labs(x = "", y = "Hypothetical Drinks Purchased", title = "Fit-to-means approach") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  ggsci::scale_color_jama()
+
+p2 <- apt_nopool_preds_subset %>%
+  ggplot(aes(x = predx, y = predy, group = id, color = id)) +
+  geom_line(aes(x = predx, y = predy, group = id, color = id)) +
+  geom_point(aes(x = x, y = y, color = id, shape = id), 
+             data = apt_long[apt_long$id %in% samples & apt_long$x > 0,],
+             size = 2, 
+             stroke = .5, 
+             fill = alpha("white", .5)) +
+  scale_shape_manual(values = shps) +
+  scale_x_log10(breaks = c(0.25, 0.5, 1, 5, 10),
+                labels = c("0.25", "0.50", "1", "5", "10"),
+                limits = c(.2, 30)) +
+  
+  scale_y_continuous(expand = c(.03,0), limits = c(0, 10)) +
+  labs(x = "Price per Drink ($USD)", y = "Hypothetical Drinks Purchased", 
+       title = "Two-stage approach") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  ggsci::scale_color_jama()
+
+
+p3 <- gridExtra::grid.arrange(p1, p2, nrow = 2)
+
+ggsave(filename = "Fig1.pdf", plot = p3, device = "pdf", 
+       path = "../plots/", width = 5, height = 7)
+```
+
+Just as there is variability in how demand is collected, there is variability in 
+how demand is analyzed [@kaplan2018aptreview; @reed2020cptreview] and demand is 
+typically analyzed in one of two ways. The first approach is to fit a demand 
+model to the sample mean consumption computed at each price.  We call this the 
+"fit-to-means" approach (see Table 1). The second "two-stage" approach is to fit a 
+demand model separately to each individual dataset (stage 1) and use the resulting 
+individual-subject demand parameter estimates in subsequent analyses (stage 2).
+The "fit-to-means" approach is shown in the top panel of 
+Figure \@ref(fig:illustrate-demand-approaches-plot)
+and the "two-stage" approach is shown in the bottom panel of 
+Figure \@ref(fig:illustrate-demand-approaches-plot). Whereas these approaches are
+relatively easy to execute, both methods have limitations that behavioral economists
+conducting this research should be aware of and we will describe the relative
+benefits and limitations later in this paper. To overcome some of these limitations, 
+recent efforts in behavior analysis [@dehart2019mixed; @gilroy2020caregiver; @bottini2020tx] 
+and behavioral economics 
+[@young2017multilevel; @collins2014marijuana; @liao2013leftcensored; @zhao2016twopart; 
+@acuff2021social; @kaplan2020lownic; @powell2020nicreduction; @hofford2016cocaine] have been made 
+to encourage the use of mixed-effects models (i.e., mixed-models, multilevel models), 
+which is a modeling approach that integrates the relative advantages of these 
+two approaches into a single stage analysis. However, we are not aware of any
+accessible materials specifically tailored for behavioral economists for implementing the mixed-effects
+modeling approach for behavioral economic demand.
+
+As a result, the goal of the current article is to provide an easily accessible 
+introduction to mixed-effects models in studies of operant demand. A more in-depth 
+discussion regarding the relative merits of the mixed-model approach in demand, 
+including quantitative comparisons 
+can be found in @yu2014analytic and others [@collins2014marijuana; @zhao2016twopart]. 
+In the current paper, we will 
+first discuss the nonlinear approach to fitting demand curve data and introduce 
+important terminology and concepts (see Table 1). Then, we will orient readers 
+to a previously published human hypothetical Alcohol Purchase 
+Task dataset [@kaplan2018happyhour] consisting of a single sample of participants under one 
+experimental condition. Using this dataset, we will illustrate the two common approaches 
+to fitting demand curve data and discuss their relative benefits and limitations.
+Then, we will provide an overview of nonlinear mixed-effects modeling 
+and apply this approach to the dataset, comparing and contrasting with
+the earlier approaches. We will then extend these analyses to a nonhuman dataset [@koffarnus2012monkey] 
+with one sample of monkeys who each self-administered a series of drugs and other reinforcers.
+Throughout we will conduct the analyses in the open-source `R` statistical software [@RCore]. 
+To facilitate open-source documentation [@gilroy2019github], data and code to perform these analyses can 
+be found at the corresponding author’s GitHub repository[^2]. That is,
+all data and code necessary to reproduce the contents of this document, as well as additional 
+figures and tables, are available as an RMarkdown document (i.e., a document containing both 
+text and code which can then be rendered into other document types)  in the 
+GitHub repository. Whereas this article will remain static, the RMarkdown document
+will be updated occasionally based on advances and improvements in the `R` statistical
+software. We encourage interested readers to consult and interact with
+this RMarkdown document. 
+
+[^2]: https://github.com/brentkaplan/mixed-effects-demand
+
+## Nonlinear fitting of demand curve data
+
+Demand data are often fitted with a nonlinear exponential decay model using ordinary
+least squares regression (see @gilroy2018dca; Table 1), which estimates 
+parameter values (values that we do not know but wish to estimate with the collected
+data) by minimizing the squared difference between observed consumption 
+values and the predicted consumption values. The differences between the observed
+and predicted data are referred to as the residuals. Due to the 
+increasing use of hypothetical purchase tasks where zero values are often observed, 
+the following nonlinear model [@koffarnus2015modified] has proven useful in 
+characterizing these data:
+
+\begin{equation}
+Q_{j}=Q_{0}\cdot10^{k(e^{-\alpha Q_{0}C_{j}}-1)}+\varepsilon_{j},j=1,...,k\label{eq:koffeq}
+\end{equation}
+
+where $Q_{j}$ represents quantity of the commodity purchased/consumed at the $j$-th price 
+point and $C_{j}$ is the $j$-th price, and these are known from the data. This
+model estimates for $Q_{0}$, representing unconstrained purchasing when $C_{j}=\$0.00$
+(i.e., the intercept), and $\alpha$, representing the rate of change in elasticity
+across the demand curve (i.e., most analogous to a slope parameter; see 
+@gilroy2020elasticity for more on the interpretation of elasticity in operant
+demand). The term $k$ represents the range of data (e.g., quantities purchased) in 
+logarithmic units and can be solved as a fitted parameter or can be set as a 
+constant by determining _a priori_ an appropriate range. 
+The model is structured as an exponential decay function so the $k$
+parameter restricts the range of consumption to a specific lower non-zero asymptote. Finally,
+the error ($\varepsilon$) term is assumed to be normally distributed with mean of
+0 and variance of $\sigma^2$. We use this model for illustrative purposes in this 
+tutorial, although mixed-effects models can be implemented on the demand model 
+of the user’s choice [e.g., @yu2014analytic; @liao2013leftcensored; @gilroy2021zbe], 
+including the nonlinear model from which 
+the above model was formulated [@hursh2008expo].
+
+# Example Application: Human Hypothetical Purchase Task
+
+## Dataset
+
+The dataset is from @kaplan2018happyhour in which participants completed a hypothetical
+Alcohol Purchase Task (APT; @kaplan2018aptreview). A total of `r nrow(apt)` participants
+initially completed the task in full (four participants were excluded for missing data).
+An additional `r length(unique(apt_unsys$id[apt_unsys$NumPosValues < 3]))` participants
+were not included because they had less than three positive consumption values. 
+The APT consisted of `r length(unique(apt_long$x))` prices, 
+expressed as price per drink (\$0.00, \$0.25, \$0.50, \$1.00, \$1.50, \$2.00, 
+\$2.50, \$3.00, \$4.00, \$5.00, \$6.00, \$7.00, \$8.00, \$9.00, \$10.00, 
+\$15.00, and \$20.00). Participants reported how many alcoholic drinks they would
+purchase and consume at each of the `r length(unique(apt_long$x))` prices.
+
+### Systematicity
+
+Stein and colleagues [@stein2015nonsystematic] proposed three criteria by which to suggest demand data 
+are systematic. These criteria include 1) trend, 2) bounce, and 3) reversals from zero.
+We applied these criteria to the data for identifying unsystematic 
+response patterns. Overall, data were highly systematic with a total of 
+`r length(unique(apt_unsys$id[apt_unsys$TotalPass != 3]))` unique participants 
+failing at least one of the criteria. Although in typical approaches to analyzing
+demand these unsystematic responses may be excluded, we will include
+these cases to demonstrate the robustness of the mixed-model estimates of $Q_0$ 
+and $\alpha$. Although we recommend researchers screen
+for systematicity and report these numbers, ultimately the researcher must
+determine whether to retain these participant datasets in a mixed-effects model analysis.
+One approach we recommend is to analyze the data including all participants and 
+compare these results to the subset of data which pass the criteria to determine
+whether the removal of nonsystematic data alters the interpretation of results 
+[@young2017multilevel].
+
+## Common approaches to analyzing demand curve data
+
+In our experience with the literature, there are two primarily common ways to 
+analyze demand curve data. These approaches are differentiated by whether the
+study is interested in inferring what is common across individuals (fit-to-means
+approach) or is interested in inferring the degrees and causes of variation 
+among the individuals (two-stage approach). Said another way, the former approach
+is primarily concerned with making generalizations about the broader "population"
+(as defined in each experiment) whereas the latter approach is primarily concerned
+with individual trends. 
+
+### Fit-to-means approach
+
+The fit-to-means approach relies on averaging individual participant responses 
+within a group at each price, then fitting a single curve through the series 
+of price-specific group means. This approach is typically used when the 
+researcher is interested in making "population" level inferences.
+
+#### Illustration of the fit-to-means approach
+
+The current Alcohol Purchase Task dataset is comprised of only one group, therefore this approach will yield 
+one $Q_{0}$ and one $\alpha$ for the entire sample (i.e., population-level fixed 
+effect; see Table 1). No individual-specific parameters
+can be estimated using this approach. Visually, we can see the 
+results of this method in Figure \@ref(fig:fit-to-means-plot). 
+The left panel shows the overall fit from this model in red along with the observed 
+individual responses and the vertical lines at each price represent 
+the interquartile range (the middle 50% of the data). The right panel displays a 
+subset of individual participants and their responses. Note how the red lines 
+(the prediction from the model) are identical across individual participant plots 
+because this method only returns population-level estimates of $Q_{0}$ and $\alpha$.
+
+```{r fit-to-means-plot, results = 'asis', fig.cap = "Fit-to-means approach. Left panel: Individual points in gray and subset of participants from right panel in blue. Black vertical bars indicate the interquartile range between 25% and 75%. The red line shows the predictions from the fit-to-means approach. Right panel: A subset of participants and their reported responses. The red line is identical to the fit-to-means approach demonstrating each participant has the identical predicted values. Visual inspection reveals that the estimated trend in red is inadequate to characterize the data for a number of participant datasets (e.g., Nonsys Increase, Max Q0).", fig.height = 8, fig.width = 9}
+
+## store fit to means (pooled) predictions
+pooled <- apt_pool_df$preds[[1]]
+
+## maxy <- max(apt_long$y[apt_long$id %in% samps])
+maxy <- 50
+
+## make plot 1 with all data point and fit to means curve
+p1 <- pooled %>%
+  dplyr::filter(predx > 0) %>%
+  ggplot(aes(x = predx, y = predy)) +
+  geom_linerange(aes(x = x, y = -1, ymin = lwr, ymax = upr),
+                data = apt_sum[apt_sum$x > 0, ], size = 1.2) +
+  geom_point(aes(x = x, y = y, group = id), 
+             data = apt_long[apt_long$x > 0,],
+             shape = 16, 
+             color = "gray50", 
+             alpha = .25, 
+             size = 2, 
+             stroke = .25) +
+  geom_point(aes(x = x, y = y, group = id), 
+             data = apt_long[apt_long$x > 0 & apt_long$id %in% samps,],
+             shape = 23, 
+             color = "#424590", 
+             alpha = 1, 
+             size = 2, 
+             stroke = .25) +
+  geom_line(color = "#A42820", size = 1) +
+  coord_trans(x = "log10", xlim = c(.1, 20),
+              ylim = c(0, maxy)) +
+  scale_x_continuous(breaks = c(0.1, 0.1, 1, 10),
+                labels = c("0.1", "0.1", "1", "10")) +
+  scale_y_continuous(expand = c(.01,0)) +
+ 
+  labs(x = "Price per Drink ($USD)", y = "Drinks Purchased") +
+  theme_bw()
+
+## make faceted plot 2 with sampled data sets overlaying fit to means curve
+p2 <- apt_nopool %>%
+  ungroup() %>%
+  dplyr::filter(id %in% samps) %>%
+  unnest(cols = "preds") %>%
+  filter(predx > 0) %>%
+  mutate(id = fct_relevel(id, c("Min Q0",
+                             "Median Q0",
+                             "Max Q0",
+                             "Min Alpha",
+                             "Median Alpha",
+                             "Max Alpha",
+                             "Nonsys\nIncrease",
+                             "Static",
+                             "Nonsys"))) %>%
+  ggplot(aes(x = predx, y = predy, group = id)) +
+  geom_line(color = "#A42820", aes(x = predx, y = predy, group = 1),
+            data = pooled[pooled$predx > 0, ]) +
+  geom_point(aes(x = x, y = y, group = id), 
+             data = apt_long[apt_long$x > 0 & apt_long$id %in% samps,],
+             shape = 23, 
+             fill = "white", 
+             color = "#424590") +
+  coord_trans(x = "log10", xlim = c(.1, 20), ylim = c(-.33, maxy)) +
+  scale_x_continuous(breaks = c(0.1, 0.1, 1, 10),
+                labels = c("0.1", "0.1", "1", "10")) +
+  scale_y_continuous(expand = c(.05,0.05)) +
+  facet_wrap(~ id, ncol = 3) +
+  labs(x = "Price per Drink ($USD)", y = "Drinks Purchased") +
+  theme_bw()
+
+## side by side plot
+p3 <- gridExtra::grid.arrange(p1, p2, ncol = 2)
+
+## 
+ggsave(filename = "Fig2.pdf", plot = p3, device = "pdf", 
+       path = "../plots/", width = 9, height = 8)
+```
+
+#### Benefits and limitations of the Fit-to-Means Approach
+
+A benefit to this approach is that no data need to be necessarily excluded. 
+Participants who report zero consumption (incompatible with the 
+log scale of analysis in some equations) can still be included as curves are fit
+to the averaged data, so long as some participants in the sample have greater than 
+zero consumption. Typically, convergence (i.e., the state when the fitting algorithm 
+obtains a set of parameter estimates based on some predefined threshold) is more easily 
+achieved when consumption data are averaged prior to fitting the model effectively 
+smoothing abrupt transitions from one price to the next, which is a response
+pattern sometimes observed at the individual level (e.g., see "Median $\alpha$" 
+plot in Figure \@ref(fig:fit-to-means-plot)). Notwithstanding these benefits, 
+this approach is limited in that all participants share the same 
+$Q_{0}$ and $\alpha$ values and as such, 
+participant-level comparisons cannot be conducted. This approach does not allow for
+investigations into how participant-specific demand parameters may relate to other
+factors (e.g., response to treatment, demographic variables). In addition, any inferences 
+made at the group level should not be assumed to hold true at the individual level, 
+as this is known as the "ecological fallacy" [@robsinson1950fallacy]. 
+
+### Two-stage approach
+
+The second commonly used approach is to fit a regression model to each participant. 
+Unlike the fit-to-means approach, the two-stage approach does not average over participants. 
+Rather, subject-specific $Q_{0}$ and $\alpha$ values are 
+estimated in the first stage. The second stage is to make inferences about 
+variation in the fitted $\hat{\alpha}$ and $\hat{Q_{0}}$ values 
+using other statistical tests such as t-tests, analysis of variance, or even 
+mixed-effects models.
+
+#### Illustration of the Two-Stage Apporach
+
+For this dataset (`r length(unique(apt_long$id))` participants), a total of 
+`r nrow(apt_nopool[!is.na(apt_nopool$q0),])` demand curves were able to be fit, 
+each resulting in a $\hat{Q_{0}}$ and an $\hat{\alpha}$ value. Unique to the two-stage
+approach is that occasionally (depending on the task and participant sample) certain
+participant's data are especially difficult or unable to be fit using operant
+demand models. The failure to converge may be due to relatively few positive consumption 
+values, that these data do not follow the "typical" downward sloping function, or 
+that starting values are not appropriately identified. As a result, 
+a total of `r nrow(apt_nopool[is.na(apt_nopool$q0),])` participants' data were 
+excluded from this analysis. The left panel of Figure \@ref(fig:two-stage-plot) depicts the 
+individual fits to a subset of participants' data. Contrast 
+Figure \@ref(fig:two-stage-plot) with Figure \@ref(fig:fit-to-means-plot). Whereas this two-stage 
+approach will typically result in predicted lines fitting closest to the data 
+(compared to other approaches), such
+predictions may not be "generalizable" to either other participants (or individuals
+in a population) or other experimental conditions. That is, relatively more parameter
+fits are being conducted than what is necessary. This lack of generalizability
+is partly due to the model being optimized to a small amount of data relative to 
+what else is "known" in the experiment (e.g., do other participants respond 
+in similar ways to an experimental manipulation, do participants tend to respond
+more similarly to their own other responses regardless of other experimental manipulations).
+
+```{r two-stage-plot, results = 'asis', fig.cap = "First stage model fitting from the two-stage approach. Left panel: Individual predicted lines in gray and subset of participants' predicted lines from right panel in blue. Note here because of this approach, no overall, group-level predicted curve is generated. Right panel: A subset of participants and their reported responses. The blue lines show predicted values for each participant. As illustrated in the bottom three panels, one of the limitations of the two-stage approach is that irregular datasets often times do not yield usable demand metrics. In these cases, no model predictions are obtained and demand parameters from these models cannot be used in subsequent analyses.", fig.height = 8, fig.width = 9}
+
+## store two stage (no pool) predictions
+apt_nopool_preds <- apt_nopool %>%
+                    ungroup() %>%
+                    unnest(cols = "preds") %>%
+                    dplyr::filter(predx > 0) %>%
+  mutate(id = fct_relevel(id, c("Min Q0",
+                             "Median Q0",
+                             "Max Q0",
+                             "Min Alpha",
+                             "Median Alpha",
+                             "Max Alpha",
+                             "Nonsys\nIncrease",
+                             "Static",
+                             "Nonsys")))
+
+## make plot 1 with all two stage predicted lines
+p1 <- apt_nopool_preds %>%
+  ggplot(aes(x = predx, y = predy, group = id)) +
+  geom_line(alpha = .05) +
+  geom_line(aes(x = predx, y = predy, group = id), 
+            data = apt_nopool_preds[apt_nopool_preds$id %in% samps,],
+            color = "#550307", 
+            alpha = 1, 
+            linetype = "dashed") +
+  coord_trans(x = "log10", xlim = c(.1, 20),
+              ylim = c(0, 50)) +
+  scale_x_continuous(breaks = c(0.1, 0.1, 1, 10),
+                labels = c("0.1", "0.1", "1", "10")) +
+  scale_y_continuous(expand = c(.01,0)) +
+  labs(x = "Price per Drink ($USD)", y = "Drinks Purchased") +
+  theme_bw()
+
+## make plot 2 with data points and subset predicted lines
+p2 <- apt_nopool_preds %>%
+  dplyr::filter(id %in% samps) %>%
+  ggplot(aes(x = predx, y = predy, group = id)) +
+  geom_line(color = "#550307", 
+            alpha = 1,
+            linetype = "dashed") +
+  geom_point(aes(x = x, y = y, group = id), 
+             data = apt_long[apt_long$x > 0 & apt_long$id %in% samps,],
+             shape = 23, fill = "white", color = "black") +
+  coord_trans(x = "log10", xlim = c(.1, 20), ylim = c(-.33, 50)) +
+  scale_x_continuous(breaks = c(0.1, 0.1, 1, 10),
+                labels = c("0.1", "0.1", "1", "10")) +
+  scale_y_continuous(expand = c(.05,0.05)) +
+  facet_wrap(~ id, ncol = 3) +
+  labs(x = "Price per Drink ($USD)", y = "Drinks Purchased") +
+  theme_bw()
+
+## side by side plot
+p3 <- gridExtra::grid.arrange(p1, p2, ncol = 2)
+
+##
+ggsave(filename = "Fig3.pdf", plot = p3, device = "pdf", 
+       path = "../plots/", width = 9, height = 8)
+```
+
+#### Benefits and limitations of the Two-Stage Approach
+
+A benefit of the two-stage approach is that demand parameters at the individual participant
+level can be obtained and used for downstream (i.e., stage 2) comparisons. Several limitations
+are associated with this approach. One limitation is that demand parameters 
+may be either very difficult to estimate or not estimable for some 
+participants with sparse data (e.g., only one or two 
+positive consumption values) or with extreme "step" response patterns with abrupt
+decreases in consumption from one price to the next. These exclusions limit the 
+scope of inference to those individuals at least somewhat described by the model.
+That is, if derived parameter values ($Q_{0}$ and $\alpha$) from response patterns 
+that do not follow the "typical" downward sloping function are not able to be 
+estimated using traditional fitting algorithms, then downstream comparisons will 
+be limited to a subset of the overall sample (this limit of scope is similar to 
+when data that only meet systematic inclusion criteria [Stein et al., 2015] are 
+included in an analysis).
+Another limitation is that individual $Q_{0}$ and $\alpha$
+are treated as perfectly accurate estimates with no error when these parameters
+are used in subsequent statistical tests. Naturally, the first stage model fits
+are imperfect, yet none of this uncertainty carries forward to the second stage of
+analysis. Any second stage analysis will assume the participant-specific demand 
+parameters provided are known with complete certainty and this will provide inaccurate
+estimates of associated standard errors. This approach also disregards 
+_intrasubject_ correlations across experimental conditions, which can also affect
+the estimates in subsequent analyses unless special care is taken to model these
+correlations. Intrasubject correlation refers to the association shared between data points 
+collected within the same subject and is a commonly observed phenomenon in repeated 
+measures studies.This "two-stage" approach - where 
+demand parameters are obtained in the first step and compared in a separate, second
+step - may result in biased conclusions and generalizability may be compromised.
+This approach also lacks philosophical appeal since there is no overarching model that
+relates individual subject parameter estimates to the population average that 
+are of interest to researchers.
+
+Each of these two approaches discussed have their relative benefits and drawbacks. 
+An ideal method of incorporating the benefits of each approach would be conducted in 
+a single stage, use all available data, incorporate covariates and experimental factors
+(which are usually only addressed at the second stage), and result in "population" 
+level estimates (see Table 1) while also providing individual level 
+predictions and accounting for intrasubject correlation. The mixed-effects modeling 
+approach we describe next has precisely these characteristics.
+
+## Mixed-effects models
+
+Several key concepts related to the mixed-effects modeling approach need to be 
+discussed. Recall in the fit-to-means approach, we referred to the resulting group-level 
+estimates "fixed effects" because they are considered common to all
+individuals within a group and thus invariant within the observational unit (i.e.,
+participant). At the highest degrees of generality, fixed effects may describe 
+the underlying population structure and do not vary from one individual to the 
+next.
+
+A random effect is a model term that varies from one individual or sub-group 
+to the next. To model this variation, random effects
+are governed by probability distributions. These random effects can be 
+thought of as *deviations around population level fixed effects.* By specifying 
+random effects on model parameters ($Q_{0}$,  $\alpha$),
+we allow a given participant to deviate relatively higher or relatively lower
+around the population average fixed effects. On
+average, these random-effect deviations will equal 0, which is just a different way of
+saying that on average, the individual estimates will equal the population level 
+estimates.
+
+The mixed-model approach introduces the ideas of _shrinkage_ and _partial pooling_,
+which come into play when the dataset contains values far from the average (i.e., outliers).
+For example, suppose a participant in our dataset shows much higher consumption
+compared to many other participants in the group. In the two-stage approach, the 
+estimated parameters for this participant will be far from the average. 
+While this may certainly be a valid dataset and response pattern, large outliers 
+inflate estimates of individual error variance. The inflated error introduces 
+greater uncertainty the individual's parameter estimates, which in turn inflates 
+uncertainty in downstream analyses of individual variation in those parameters. 
+In this way, error propagates through each step of the analysis, resulting in 
+confidence intervals of second stage estimates that do not accurately reflect 
+error variance from the first stage. Importantly, if no additional steps are 
+taken to integrate error over each step, then estimates of the confidence intervals 
+and other inferential statistics are likely to be incorrect.
+Rather, in a mixed-model approach, information from the entire group is leveraged 
+to *shrink* the imprecise estimates back towards the group average. Because this 
+benefit relies on anomalous estimates having a certain degree of imprecision, 
+the estimates may not differ drastically from the two-stage approach in sufficiently 
+large samples. In the mixed-model approach, the fixed effects will more
+closely reflect the underlying response patterns of the individuals (e.g., these
+fixed effect estimates will be influenced less by outliers or excessively high values) 
+as will the random effects (estimates associated with each participant) be more 
+reflective of the pattern of responding of the group as a whole (see Ch. 13 of 
+@mcelreath2018rethinking for additional examples).
+
+The most extreme case of parameter imprecision occurs when, due to anomalies in 
+the data, one or more parameters do not have a solution, i.e., the likelihood 
+function is flat and the parameter sampling error is infinity. In our example, 
+the center-bottom pane of Figure \@ref(fig:two-stage-plot) shows an individual that altogether lacks 
+the variation in responses needed to estimate both $k$ and $\alpha$. In that case, the 
+model will not converge to a solution, and the resulting parameter estimates may 
+take extreme values that act as random outliers in the second step of the analysis. 
+The principle of shrinkage applies to these scenarios most of all by forcing 
+non-estimable parameters to take the values of their group means and thus have no 
+influence on subsequent inferences. This effect could be regarded as an automatic 
+mechanism of imputation given insufficiently informative data on some individuals.
+
+A final discussion point before illustrating this approach is how these 
+mixed-effects models are estimated within the frequentist paradigm. Mixed-effects 
+models are typically solved
+via maximum-likelihood estimation (see Table 1; note these 
+models can also be solved via other techniques such as Markov Chain Monte Carlo
+but this is beyond the scope of the current paper). 
+A brief overview of this approach 
+follows. First, a likelihood function (which relates to the observed data
+to the parameters the experimenter is interested in) is evaluated for an initial
+candidate set of parameters during a single iteration of the model evaluation. 
+The algorithm assesses the shape of the likelihood surface at these parameter values,
+then picks a new set of parameter values to achieve a higher likelihood in the next
+iteration. The model continues to iteratively select both individual subject (i.e.,
+random effect) and group (i.e., fixed effect) parameter values and evaluate 
+the likelihood in this manner until the algorithm reaches the maximum of the 
+likelihood function. This final set of random- and fixed-effect values is the set which make the
+observed data "most likely" to have occurred, and thus serve as the parameter 
+estimates based on the observed data. Restricted maximum likelihood is frequently
+used for mixed-effects models since it typically produces variance estimates with
+less bias than traditional maximum likelihood [@liao2002reml; @meza2007reml]. However, 
+regular maximum likelihood
+estimation is used for comparing fixed effects across different mixed-effects models.
+For more in-depth discussion, see [@bates2014fitting]. 
+The primary difference, therefore, between maximum likelihood estimation 
+and nonlinear least squares regression is that the 
+former determines the coefficients that maximize the probability of the observed
+data, whereas the latter minimizes the error (deviations between the predicted and
+observed values). 
+
+#### Illustration of Mixed-Effects Models
+
+Adapting the behavioral economic demand model (Eq. 1) for use in the mixed-effects
+model framework yields:
+
+\begin{equation}
+Q_{ij}=Q_{0_{i}}\cdot10^{k(e^{-\alpha_{i}Q_{0_{i}}C_{ij}}-1)}+\varepsilon_{ij},i=1,...,n,j=1,...,c
+\end{equation}
+
+where here $Q_{ij}$ represents quantity of the commodity purchased/consumed
+by the $i$-th _participant_ at the $j$-th price 
+point and $C_{ij}$ is the $j$-th price associated with the $i$-th participant 
+(again these are known from the data). $Q_{0_{i}}$ and $\alpha_{i}$ represent 
+intensity and rate of change in elasticity associated with the 
+$i$-th participant. Finally, the error ($\varepsilon_{ij}$) term is error associated 
+with each individual. This and any other mixed-effects model can be expanded into
+matrix notation, which can be found in the Appendix.
+
+In the statistical program, R, there are several functions and packages for fitting nonlinear
+mixed-effects models. For the purposes of this paper, we use `nlme` from
+the `nlme` package (@pinheironlme; see also `nlmer` from the `lme4` package, for example). 
+As mentioned earlier, the code necessary to reproduce all figures and analyses 
+are located in the corresponding author's GitHub[^3].
+
+[^3]: https://github.com/brentkaplan/mixed-effects-demand
+
+We can see the results of the mixed-effects models in Figure \@ref(fig:nlme-apt-fit-plot). 
+Several things are important to note. First, notice this model provides group-level
+fixed-effects predictions (left panel; red prediction line) and participant level 
+predictions (blue and gray lines) obtained 
+from _adding the fixed and random effects together_ because, again, 
+the random effects are _deviations around_ the group-level fixed effects associated
+with individual subject data.
+In the left panel of Figure \@ref(fig:nlme-apt-fit-plot) we see the group-level 
+fixed-effect predictions approximate the average of all the lines and look similar to
+the left panel of Figure \@ref(fig:fit-to-means-plot). In the right panel of Figure 
+\@ref(fig:nlme-apt-fit-plot) we see the participant level predictions match closely
+to the individual points and look similar to the right panel of Figure 
+\@ref(fig:two-stage-plot). Figure S1 in the supplementary materials shows how these 
+two approaches differ by overlying these lines on the raw consumption data. 
+
+```{r nlme-apt-fit-plot, results = 'asis', fig.cap = "Mixed-effects model regression: Left panel: Individual predicted lines in gray, subset of participants' predicted lines from right panel in blue, and the overall group's predicted line in red. Note here the mixed-effects model provides an overall predicted line and individual predictions, both which leverage data from all participants. Right panel: A subset of participants and their reported responses. The blue lines show predicted values from participants' random effects, which deviate from the overall group mean (red line in left panel).", fig.height = 8, fig.width = 9, include = T}
+
+## generate predicted lines for subset using random effects
+newvary <- coef(apt_nlme) %>%
+  rownames_to_column("id") %>%
+  group_by(id) %>%
+  mutate(preds = map2(q0, alpha, pred, kval)) %>%
+  ungroup() %>%
+  unnest(cols = "preds") %>%
+  filter(predx > 0) %>%
+  mutate(id = fct_relevel(id, c("Min Q0",
+                             "Median Q0",
+                             "Max Q0",
+                             "Min Alpha",
+                             "Median Alpha",
+                             "Max Alpha",
+                             "Nonsys\nIncrease",
+                             "Static",
+                             "Nonsys")))
+
+## generate predicted line for population (fixed effects)
+newavg <- data.frame(q0 = fixef(apt_nlme)[[1]],
+                     alpha = fixef(apt_nlme)[[2]]) %>%
+  mutate(id = "fixed") %>%
+  group_by(id) %>%
+  mutate(preds = map2(q0, alpha, pred, kval)) %>%
+  ungroup() %>%
+  unnest(cols = "preds") %>%
+  filter(predx > 0)
+
+## make plot 1 showing the individual predicted lines from the random effects
+## and the one predicted line from the population fixed effects
+p1 <- newavg %>%
+  filter(predx > 0) %>%
+  ggplot(aes(x = predx, y = predy, group = id)) +
+  geom_line(data = newvary[newvary$predx > 0,],
+            alpha = .05) +
+  geom_line(color = "#BD1E1E", size = 1.5) +
+  geom_line(data = newvary[newvary$id %in% samps & newvary$predx > 0,], 
+            color = "#0072B2", 
+            alpha = 1.25,
+            linetype = "dashed") +
+  coord_trans(x = "log10", xlim = c(.1, 20),
+              ylim = c(0, 50)) +
+  scale_x_continuous(breaks = c(0.1, 0.1, 1, 10),
+                labels = c("0.1", "0.1", "1", "10")) +
+  scale_y_continuous(expand = c(.01,0)) +
+  labs(x = "Price per Drink ($USD)", y = "Drinks Purchased") +
+  theme_bw()
+
+## make plot 2 showing the predicted lines from the random effects
+## faceted for the subsets
+p2 <- newvary %>%
+  dplyr::filter(id %in% samps, predx > 0) %>%
+  left_join(., select(newavg, predx, "avgy" = predy), by = "predx") %>%
+  ggplot(aes(x = predx, y = predy, group = id)) +
+  geom_line(color = "#0072B2", alpha = 1,
+            linetype = "dashed") +
+  geom_line(aes(x = predx, y = avgy),
+            color = "#BD1E1E") +
+  geom_point(aes(x = x, y = y, group = id),
+             data = apt_long[apt_long$x > 0 & apt_long$id %in% samps,],
+             shape = 23, fill = "white", color = "black", size = 1.5) +
+  coord_trans(x = "log10", xlim = c(.1, 20), ylim = c(-.33, 50)) +
+  scale_x_continuous(breaks = c(0.1, 0.1, 1, 10),
+                labels = c("0.1", "0.1", "1", "10")) +
+  scale_y_continuous(expand = c(.05,0.05)) +
+  facet_wrap(~ id, ncol = 3) +
+  labs(x = "Price per Drink ($USD)", y = "Drinks Purchased") +
+  theme_bw()
+
+## side by side plot
+p3 <- gridExtra::grid.arrange(p1, p2, ncol = 2)
+
+##
+ggsave(filename = "Fig4.pdf", plot = p3, device = "pdf", 
+       path = "../plots/", width = 9, height = 8)
+```
+
+```{r fixed-summary-tab, results = 'asis'}
+apt_fixed_sum %>%
+  mutate(Parameter = ifelse(Parameter %in% "alpha", "log($\\alpha$)", "log($Q_{0}$)")) %>%
+knitr::kable(., caption = "Comparison of Fixed Effect Parameter Estimates 
+             from the Modeling Approaches", digits = 4, escape = FALSE)
+```
+
+```{r overlap, results = 'asis', fig.height = 8, fig.width = 9, fig.cap = "Graphical comparisons between the three different approaches to analyzing demand curve data. Data from Kaplan and Reed (2018). Left panel: Individual points in gray circles and mean consumption at each price in open circles. The orange line represents the best-fit line using the fit-to-means approach whereas the blue line represents the best-fit line obtained from the fixed effects estimated using the mixed-effects modeling approach. Notice how the population-level fixed effects provides a best-fit line slightly lower than the fit-to-means approach. The mixed-effects model is able to provide random effect predictions for some datasets with low and flat line consumption values (e.g., “static” dataset bottom row of right panel), which influences the population level fixed effects, while also shrinking predictions from datasets with high consumption values. Right panel: A subset of participants and their responses. The maroon lines show the best fit lines from the two-stage approach for each participant. The gray lines show the predicted lines from the random effects obtained from the mixed-effects model approach. Overall, the lines show close correspondence with the bottom row yielding predicted lines from only the mixed-effects model approach."}
+
+apt_partialpool_preds <- apt_partialpool %>%
+  unnest(preds) %>%
+  dplyr::filter(id %in% samps, predx > 0) %>%
+  mutate(id = factor(id))
+
+colrs <- c("Fit to Mean" = "red", "Mixed Model" = "blue")
+p1 <- apt_pool_df %>%
+  unnest(preds) %>%
+  dplyr::filter(predx > 0) %>%
+  ggplot(aes(x = predx, y = predy)) +
+   geom_line(aes(color = "Fit to Mean"), size = 1) +
+  geom_line(data = filter(as.data.frame(apt_fixef$preds), predx > 0),
+            aes(color = "Mixed Model"), size = 1) +
+  geom_linerange(aes(x = x, y = -1, ymin = lwr, ymax = upr),
+                data = apt_sum[apt_sum$x > 0, ], size = 1.2) +
+  geom_point(aes(x = x, y = mn),
+             data = filter(apt_sum, x > 0),
+             shape = 21, color = "black", alpha = 1,
+             size = 3, stroke = 1, fill = "white") +
+  geom_point(aes(x = x, y = y, group = id), 
+             data = apt_long[apt_long$x > 0,],
+             shape = 16, color = "gray50", alpha = .25, 
+             size = 2, stroke = .25) +
+ 
+  coord_trans(x = "log10", xlim = c(.1, 20),
+              ylim = c(0, 50)) +
+  scale_x_continuous(breaks = c(0.1, 0.1, 1, 10),
+                labels = c("0.1", "0.1", "1", "10")) +
+  scale_y_continuous(expand = c(.01,0)) +
+  scale_color_manual(values = c("Fit to Mean" = "#DF8F44FF", 
+                                "Mixed Model" = "#374E55FF"), 
+                     name = "Regression \nMethod",
+                     guide = guide_legend(nrow = 2)) +
+  labs(x = "Price per Drink ($USD)", y = "Drinks Purchased") +
+  theme_bw() +
+  theme(legend.position = "bottom")
+
+p2 <- apt_nopool %>%
+  unnest(preds) %>%
+  dplyr::filter(id %in% samps, predx > 0) %>%
+  ggplot(aes(x = predx, y = predy, group = id)) +
+  geom_line(aes(color = "Two Stage"), alpha = 1) +
+  geom_line(data = filter(apt_partialpool_preds, 
+                          id %in% samps, predx >0),
+            aes(color = "Mixed Model"), size = 1) +
+  geom_point(aes(x = x, y = y, group = id),
+             data = apt_long[apt_long$x > 0 & apt_long$id %in% samps,],
+             shape = 21, fill = "white", color = "black", size = 2) +
+  coord_trans(x = "log10", xlim = c(.1, 20), ylim = c(-.33, 50)) +
+  scale_x_continuous(breaks = c(0.1, 0.1, 1, 10),
+                labels = c("0.1", "0.1", "1", "10")) +
+  scale_y_continuous(expand = c(.05,0.05)) +
+  facet_wrap(~ id) +
+  scale_color_manual(values = c("Two Stage" = "#B24745FF", 
+                                "Mixed Model" = "#80796BFF"), name = "Regression \nMethod",
+                     guide = guide_legend(nrow = 2, 
+                                          reverse = TRUE)) +
+  labs(x = "Price per Drink ($USD)", y = "Drinks Purchased") +
+  theme_bw() +
+  theme(legend.position = "bottom")
+
+p3 <- gridExtra::grid.arrange(p1, p2, nrow = 1)
+
+ggsave(filename = "SuppFig1.pdf", plot = p3, device = "pdf", 
+       path = "../plots/", width = 9, height = 8)
+```
+
+Up to this point, we have demonstrated how the mixed-effects model can be applied
+to a single group and how estimates differ from the fit-to-means and two-stage
+approaches. We now discuss how these mixed-effects models can be extended to 
+different types of experimental designs, including between subject and
+within-subject designs.
+
+# Extending the Mixed-Effects Model
+
+## Between-subject designs
+
+Extending the mixed-effects models described here to between-subject designs 
+comparing two or more groups at a single timepoint 
+is straightforward and relatively simple. For these designs, an additional
+fixed effect representing the between-subject experimental manipulation is 
+added. The random effects structure remains the same.
+
+## Crossed and nested designs
+
+Special care must be taken to understand the experimental design and data structure
+to properly specify how the random effects should be estimated in
+designs incorporating repeated measurements. Two types of these designs are crossed 
+and nested design. For example, a nested design might measure 
+demand over several days
+among two groups of participants with one group receiving active medication and
+the other group receiving placebo. These demand measurements are nested within
+participant and participant is nested within drug group (active vs. placebo). 
+However, drug group is a between-groups factor because a participant can be in
+only one group or the other. These types of models are most easily implemented in
+various mixed-effects modeling packages in the R Statistical Software.
+
+Crossed designs are those in which there are no inherent levels or nesting. For 
+example, a crossed design might be measuring demand over consecutive days
+among participants who experience two different doses of a drug. Whereas demand
+measurements are nested within participant (similar to above), all participants
+experience both doses of the drug. Therefore, there are sources of variation at 
+both the participant level and at the experimental manipulation level but 
+without exclusive nesting. Importantly, "... nested effects are an attribute of 
+the data, not the model" [@erricksonWeb]. 
+There may be experiments where no specific manipulation is 
+implemented. In these cases, a mixed-effects model can still be fit and this model 
+formulation will be relatively simple compared to more complex experimental designs.
+Here we will illustrate an example of a nonhuman self-administration
+dataset with no inherent levels of nesting between monkeys and drugs. We will 
+demonstrate how the mixed-effects model can estimate multiple fixed effects
+of interest (i.e., different reinforcers) and how we can use these models
+to directly compare differences in demand parameters using null-hypothesis testing.
+
+# Example Application: Nonhuman Self-Administration
+
+The following example illustrates application of the mixed-effects model to 
+nonhuman animal data published in @koffarnus2012monkey. The monkeys responded
+on increasing fixed-ratio schedules (i.e., "prices") to earn infusions of the various reinforcers.
+The drugs used included cocaine, ethanol, ketamine, methohexital, and remifentanil.
+Two additional conditions were tested including food (sucrose pellets) and saline infusions. 
+
+As we showed earlier in the paper, we will first demonstrate modeling by fitting to 
+the means of each reinforcer (fit-to-means approach), as well as fitting to each 
+monkey for each reinforcer (two-stage approach). Finally, we show how the mixed-effects model provides us with 
+both predictions at the reinforcer level, as well as individual monkey level for 
+each reinforcer, and how we can use estimated marginal means (i.e., least-square means)
+to compare reinforcing efficacy ($\alpha$) of the reinforcers. 
+
+```{r monkey, echo = F, message = F, warning = F, results = 'hide'}
+## read in monkey demand data
+monkey <- read_csv(paste0(ddir, "monkey-demand-data.csv"))
+monkey <- monkey %>%
+  transmute(id = Monkey, x = FR, y = Consump, drug = Drug) %>%
+  mutate(id = as.factor(id),
+         drug = factor(drug, levels = c("Cocaine", "Remifentanil", "Methohexital",
+                                        "Ketamine", "Ethanol", "Food", "Saline"))) %>%
+  filter(complete.cases(.))
+
+monkey_sum <- monkey %>%
+  group_by(drug, x) %>%
+  summarise(mn = mean(y), 
+            se = (sd(y)/sqrt(n())),
+            md = median(y),
+            gmn = gm_mean(y),
+            lwr = quantile(y, .25),
+            upr = quantile(y, .75)) %>%
+  ungroup()
+
+# observed demand metrics
+monkey_obs <- monkey %>%
+  group_by(drug) %>%
+  do(GetEmpirical(.)) %>%
+  ungroup()
+
+kval <- GetK(monkey) # 2.340616
+
+monkey_nopool <- monkey %>%
+  nest(data = c(x, y)) %>%
+  group_by(id, drug) %>%
+  mutate(fit = map(data, nls_fit2),
+         tidied = map(fit, possibly(tidy, otherwise = NA_real_)),
+         glanced = map(fit, possibly(glance, otherwise = NA_real_))) %>%
+  unnest(cols = c("data")) %>%
+  unnest(cols = "tidied") %>%
+  dplyr::select(-tidied) %>%
+  dplyr::select(id, drug, term, estimate)
+
+monkey_nopool_nofits <- monkey_nopool %>%
+  filter(is.na(estimate)) %>%
+  distinct()
+
+monkey_nopool <- monkey_nopool %>%
+  filter(!is.na(estimate)) %>%
+  distinct() %>%
+  pivot_wider(names_from = "term", values_from = "estimate") %>%
+  mutate(model = "One Fit Per Monkey") %>%
+  # mutate(model = "One Fit Per Monkey",
+  #        pmax = GetAnalyticPmax(alpha, 2, q0)) %>%
+  group_by(id) %>%
+  mutate(preds = map2(q0, alpha, pred2)) %>%
+  ungroup()
+
+# pooling by group
+monkey_pool <- monkey %>%
+  nest(data = c(id, x, y)) %>%
+  group_by(drug) %>%
+  mutate(fit = map(data, nls_fit2),
+         tidied = map(fit, possibly(tidy, otherwise = NA_real_)),
+         glanced = map(fit, possibly(glance, otherwise = NA_real_))) %>%
+  unnest(cols = c("data")) %>%
+  unnest(cols = "tidied") %>%
+  dplyr::select(drug, term, estimate) %>%
+  distinct() %>%
+  pivot_wider(names_from = "term", values_from = "estimate") %>%
+  mutate(model = "One Fit Per Drug") %>%
+  # mutate(model = "One Fit Per Drug",
+  #        pmax = GetAnalyticPmax(alpha, 2, q0)) %>%
+  group_by(drug) %>%
+  mutate(preds = map2(q0, alpha, pred2)) %>%
+  ungroup()
+
+## mixed model fit
+## since this model can take a while to run, uncomment
+## the following lines and then read in from file in future runs
+# allow correlation b/w alpha/q0 within id
+# level 1: prices
+# level 2: id
+# monkey_nlme <- nlme(y ~ 10^(q0) * 10^(2.340616 *(exp(-10^(alpha)*10^(q0)*x)-1)), 
+#                 data = monkey,
+#                 fixed = list(q0 ~ drug, 
+#                              alpha ~ drug),
+#                 random = pdBlocked(list(pdSymm(q0 + alpha ~ 1), 
+#                                         pdDiag(q0 + alpha ~ drug - 1))),
+#                 start = list(fixed = c(mean(monkey_pool$q0), 0, 0, 0, 0, 0, 0,
+#                                        mean(monkey_pool$alpha), 0, 0, 0, 0, 0, 0)), 
+#                 groups = ~id,
+#                 method = "ML",
+#                 verbose = 2,
+#                 control = list(msMaxIter = 5000,
+#                                niterEM = 5000,
+#                                maxIter = 5000,
+#                                pnlsTol = .01,
+#                                tolerance = .001,
+#                                apVar = T,
+#                                minScale = .0000001,
+#                                opt = "optim"))
+# saveRDS(monkey_nlme, file = paste0(wdir, "monkey_nlme.rds"))
+monkey_nlme <- readRDS(file = paste0(wdir, "monkey_nlme.rds"))
+
+monkey_partialpool <- extract_coefs2(monkey_nlme) %>%
+  left_join(., extract_coefs2(monkey_nlme, "alpha"), by = c("id", "drug")) %>%
+  rename("q0" = "q0mm", "alpha" = "alphamm") %>%
+  mutate(model = "Mixed Model (RE)") %>%
+  group_by(id) %>%
+  mutate(preds = map2(q0, alpha, pred2)) %>%
+  ungroup()
+
+monkey_fixef <- as.data.frame(cbind("q0" = fixef(monkey_nlme)[1:7], 
+                                "alpha" = fixef(monkey_nlme)[8:14])) 
+rownames(monkey_fixef) <- c("Cocaine", gsub("q0.drug", "", rownames(monkey_fixef)[2:7]))
+monkey_fixef <- monkey_fixef %>%
+  rownames_to_column("drug") %>%
+  mutate(model = "Mixed Model (FE)")
+monkey_fixef[2:7, c("q0")] <- monkey_fixef[2:7, c("q0")] + monkey_fixef[1, c("q0")]
+monkey_fixef[2:7, c("alpha")] <- monkey_fixef[2:7, c("alpha")] + monkey_fixef[1, c("alpha")]
+
+monkey_fixef <- monkey_fixef %>%
+  group_by(drug) %>%
+  mutate(preds = map2(q0, alpha, pred2)) %>%
+  ungroup()
+
+em_q0 <- emmeans(monkey_nlme, pairwise ~ drug, param = "q0", adjust = "fdr")
+em_alpha <- emmeans(monkey_nlme, pairwise ~ drug, param = "alpha", adjust = "fdr")
+
+monkey_coefs <- monkey %>%
+  nest(data = c(id, x, y)) %>%
+  group_by(drug) %>%
+  mutate(fit = map(data, nls_fit2),
+         tidied = map(fit, possibly(tidy, otherwise = NA_real_)),
+         glanced = map(fit, possibly(glance, otherwise = NA_real_))) %>%
+  unnest(cols = c("data")) %>%
+  unnest(cols = "tidied") %>%
+  dplyr::select(drug, term, estimate, `std.error`, statistic, `p.value`) %>%
+  distinct() %>%
+  filter(term %in% "alpha") %>%
+  pivot_wider(names_from = "term", values_from = c("estimate", "std.error",
+                                                   "statistic", "p.value")) %>%
+  ungroup() %>%
+  select(drug, "alpha" = "estimate_alpha", "se" = "std.error_alpha") %>%
+  mutate(model = "Fit to Means")
+
+monkey_coefs <- monkey_nopool %>%
+  group_by(drug) %>%
+  summarise(mn = mean(alpha), 
+            se = (sd(alpha)/sqrt(n()))) %>%
+  rename("alpha" = "mn") %>%
+  mutate(model = "Two Stage") %>%
+  bind_rows(., monkey_coefs)
+
+monkey_coefs <- em_alpha$emmeans %>%
+  as.data.frame() %>%
+  select(drug, "alpha" = "emmean", "se" = "SE") %>%
+  mutate(model = "Mixed Model") %>%
+  bind_rows(., monkey_coefs) %>%
+  mutate(parameter = "alpha")
+
+monkey_coefs_q0 <- monkey %>%
+  nest(data = c(id, x, y)) %>%
+  group_by(drug) %>%
+  mutate(fit = map(data, nls_fit2),
+         tidied = map(fit, possibly(tidy, otherwise = NA_real_)),
+         glanced = map(fit, possibly(glance, otherwise = NA_real_))) %>%
+  unnest(cols = c("data")) %>%
+  unnest(cols = "tidied") %>%
+  dplyr::select(drug, term, estimate, `std.error`, statistic, `p.value`) %>%
+  distinct() %>%
+  filter(term %in% "q0") %>%
+  pivot_wider(names_from = "term", values_from = c("estimate", "std.error",
+                                                   "statistic", "p.value")) %>%
+  ungroup() %>%
+  select(drug, "q0" = "estimate_q0", "se_q0" = "std.error_q0") %>%
+  mutate(model = "Fit to Means")
+
+monkey_coefs_q0 <- monkey_nopool %>%
+  group_by(drug) %>%
+  summarise(mn = mean(q0), 
+            se = (sd(q0)/sqrt(n()))) %>%
+  rename("q0" = "mn", "se_q0" = "se") %>%
+  mutate(model = "Two Stage") %>%
+  bind_rows(., monkey_coefs_q0)
+
+monkey_coefs_q0 <- em_q0$emmeans %>%
+  as.data.frame() %>%
+  select(drug, "q0" = "emmean", "se_q0" = "SE") %>%
+  mutate(model = "Mixed Model") %>%
+  bind_rows(., monkey_coefs_q0) %>%
+  mutate("parameter" = "q0")
+
+monkey_coefs <- monkey_coefs %>%
+  rename("estimate" = "alpha") %>%
+  bind_rows(., select(monkey_coefs_q0, drug, "estimate" = "q0", "se" = "se_q0", model,
+                      parameter)) %>%
+  rename("Reinforcer" = "drug", "Estimate" = "estimate", "SE" = "se", "Model" = "model",
+          "Parameter" = "parameter")
+
+monkey_coefs <- monkey_coefs[, c("Reinforcer", "Model", "Parameter", "Estimate", "SE")] %>%
+   mutate(Parameter = ifelse(Parameter %in% "alpha", "log($\\alpha$)", "log($Q_{0}$)"),
+          Model = factor(Model, levels = c("Fit to Means", "Two Stage", "Mixed Model"))) %>%
+  arrange(Parameter, Reinforcer, Model)
+  
+
+## set drug colors
+colrs = c("Cocaine" = "#374E55FF", "Remifentanil" = "#DF8F44FF", 
+          "Methohexital" = "#00A1D5FF", "Ketamine" = "#B24745FF",
+          "Ethanol" = "#79AF97FF", "Food" = "#6A6599FF", "Saline" = "#80796BFF")
+```
+
+### Fit-to-means and two-stage approaches
+Our first approach fits a single demand curve to each of the seven reinforcers. 
+This was the analysis method used in the original paper [@koffarnus2012monkey].
+The left panel of Figure S2 (supplemental materials) displays the fitted curve 
+to each of the reinforcers, the 25% and 75% interquartile range (vertical black 
+lines), and the individual data. The right panel 
+shows these group-level fits within each monkey. Notice here how for some monkeys, 
+the predicted lines are far from the points (e.g., Saline for LE, TI). This 
+discrepancy between the population-level predictions and some proportion of 
+the individual data is similar to what was observed with the Alcohol 
+Purchase Task dataset. Table 2 displays the estimates and standard errors from 
+the model and results from the analyses show Saline resulted in the highest 
+log($\alpha$) and Remifentanil with the lowest. Other reinforcers were intermediary. 
+
+```{r monkey-pool, results = 'hide', echo = F, include = F}
+monkey_pool_preds <- monkey_pool %>%
+  unnest(cols = c("preds")) %>%
+  filter(predx > 0) %>%
+  mutate(drug = fct_relevel(drug, c("Cocaine", "Remifentanil", "Methohexital",
+                                        "Ketamine", "Ethanol", "Food", "Saline")))
+
+## side by side
+p1 <- monkey_pool_preds %>%
+  ggplot(aes(x = predx, y = predy, group = drug)) +
+  geom_linerange(aes(x = x, y = -1, ymin = lwr, ymax = upr),
+                data = monkey_sum, size = 1.2) +
+  geom_point(aes(x = x, y = y, group = id), data = monkey,
+             shape = 16, color = "black", alpha = .25, 
+             size = 2, stroke = .25) +
+  geom_line(aes(group = drug, color = drug), size = 1) +
+  coord_trans(x = "log10", xlim = c(9, 1000)) +
+  scale_x_continuous(breaks = c(10, 32, 100, 320, 562, 1000),
+                labels = c("10", "32", "100", "320", " ", "1000")) +
+  scale_y_continuous(expand = c(.04,0)) +
+  scale_color_manual(values = colrs, name = "Reinforcer") +
+  facet_wrap(~ drug, ncol = 2, scales = "free") + # allow y axes to vary
+  labs(x = "Fixed Ratio", y = "Consumption") +
+  theme_bw() +
+  theme(legend.position = c(.80, .11)) +
+  guides(color = guide_legend(ncol = 1))
+
+pltlst <- vector(mode = "list", length = length(unique(monkey$id)))
+for (i in seq_along(unique(monkey$id))) {
+ if (i %in% c(1)) { 
+     margs <- c(.25, 0, -.2, .5) 
+  } else if (i %in% c(2)) {
+    margs <- c(.25, .5, -.2, 0)
+  } else if (i %in% c(3, 5, 7)) {
+    margs <- c(0, 0, -.2, .5)
+  } else if (i %in% c(4, 6, 8)) {
+    margs <- c(0, .5, -.2, 0)
+  } else if (i %in% c(9)) {
+    margs <- c(0, 0, 0, .5)
+  } else if (i %in% c(10)) {
+    margs <- c(0, .5, 0, 0)
+  }
+  pltlst[[i]] <- monkey %>%
+        filter(id %in% unique(monkey$id)[i]) %>%
+        mutate(drug = fct_relevel(drug, c("Cocaine", "Remifentanil", "Methohexital",
+                                        "Ketamine", "Ethanol", "Food", "Saline"))) %>%
+        ggplot(aes(x = x, y = y, group = drug)) +
+        geom_line(aes(x = predx, y = predy, group = drug, color = drug), size = .75,
+                  data = monkey_pool_preds, alpha = 1) +
+        geom_point(aes(color = drug), shape = 21, fill = "white") +
+        coord_trans(x = "log10", xlim = c(9, 1000)) +
+        scale_x_continuous(breaks = c(10, 32, 100, 320, 562, 1000),
+                      labels = as.character(c(10, 32, 100, 320, 562, 1000))) +
+        scale_y_continuous(expand = c(.06,0.1)) +
+        scale_color_manual(values = colrs, name = "Reinforcer") +
+        facet_wrap(~ drug, ncol = 2, scales = "free_y") +
+        labs(x = "", y = "", title = unique(monkey$id)[i]) +
+        theme_bw() +
+        theme(legend.position = "none",
+              strip.text = element_blank(),
+              axis.text = element_blank(),
+              plot.margin = unit(margs,"cm"),
+              title = element_text(size = 8),
+              plot.title = element_text(vjust = -2))
+}
+
+p2 <- gridExtra::grid.arrange(pltlst[[1]], pltlst[[2]], pltlst[[3]], pltlst[[4]], 
+                        pltlst[[5]], pltlst[[6]], pltlst[[7]], pltlst[[8]],
+                        pltlst[[9]], pltlst[[10]], ncol = 2)
+
+p3 <- monkey %>%
+  ggplot(aes(x = x, y = y, group = drug)) +
+  geom_line(aes(x = predx, y = predy, group = drug, color = drug), size = 1,
+            data = monkey_pool_preds, alpha = 1) +
+  geom_point(aes(color = drug), shape = 21, fill = "white") +
+  coord_trans(x = "log10", xlim = c(9, 1000)) +
+  scale_x_continuous(breaks = c(10, 32, 100, 320, 562, 1000),
+                labels = as.character(c(10, 32, 100, 320, 562, 1000))) +
+  scale_y_continuous(expand = c(.04,0)) +
+  scale_color_manual(values = colrs, name = "Reinforcer") +
+  facet_wrap(~ id, ncol = 2) +
+  labs(x = "Fixed Ratio", y = "Consumption") +
+  theme_bw() +
+  theme(legend.position = "none")
+
+
+
+```
+
+```{r monkey-pool-plot, results = 'asis', fig.cap = "Results from the monkey fit-to-means approach. Left panel: Individual points in gray. Black vertical bars indicate the interquartile range between 25% and 75%. The colored lines show the predictions from the fit-to-means approach for each reinforcer. Right panel: Nonhuman points and the observed consumption. The colored lines are identical across monkeys and within reinforcer, but vary across reinforcers, as is represented in the left panel.", fig.height = 9, fig.width = 8}
+
+p3 <- gridExtra::grid.arrange(p1, p2, ncol = 2)
+
+ggsave(filename = "SuppFig2.pdf", plot = p3, device = "pdf", 
+       path = "../plots/", width = 9, height = 8)
+
+```
+
+```{r monkey-pool-tab, results = 'asis', include = F, eval = F}
+monkey %>%
+  nest(data = c(id, x, y)) %>%
+  group_by(drug) %>%
+  mutate(fit = map(data, nls_fit2),
+         tidied = map(fit, possibly(tidy, otherwise = NA_real_)),
+         glanced = map(fit, possibly(glance, otherwise = NA_real_))) %>%
+  unnest(cols = c("data")) %>%
+  unnest(cols = "tidied") %>%
+  dplyr::select(drug, term, estimate, `std.error`, statistic, `p.value`) %>%
+  distinct() %>%
+  filter(term %in% "alpha") %>%
+  pivot_wider(names_from = "term", values_from = c("estimate", "std.error",
+                                                   "statistic", "p.value")) %>%
+  ungroup() %>%
+  rename(., "Reinforcer" = "drug", "Estimate" = "estimate_alpha", "SE" = "std.error_alpha", 
+         "T Value" = "statistic_alpha", "P Value" = "p.value_alpha") %>%
+  arrange(Estimate) %>%
+  knitr::kable(., caption = "Pooled Regression Estimates")
+```
+
+As in the human example, we show the first stage of fitting the model using the 
+two-stage approach. We encounter the same
+limitations as in the human example; namely, we are unable to derive population-level
+(i.e., reinforcer-level) estimates of $Q_{0}$ or $\alpha$ and we are unable to obtain
+individual-level fits for BU Ethanol. The left panel of Figure S3 
+shows the individual monkey fits within each reinforcer and the right panel 
+displays these fits within each monkey and for each reinforcer. As is expected, 
+these lines fit the individual data well. Table 2 displays the averaged estimates and 
+standard errors from this two-stage approach. The results of this approach are 
+consistent with those of the fit to means approach – Saline and Remifentanil 
+showing the highest and lowest log($\alpha$), respectively. 
+
+```{r monkey-nopool, results = 'hide', echo = F, include = F}
+monkey_nopool_preds <- monkey_nopool %>%
+  unnest(cols = "preds") %>%
+  filter(predx > 0) %>%
+    mutate(drug = fct_relevel(drug, c("Cocaine", "Remifentanil", "Methohexital",
+                                        "Ketamine", "Ethanol", "Food", "Saline")))
+
+p1 <- monkey_nopool_preds %>%
+  ggplot(aes(x = predx, y = predy, group = interaction(id, drug)))+
+  geom_line(aes(color = drug), size = 1, alpha = 1) +
+  coord_trans(x = "log10", xlim = c(9, 1000)) +
+  scale_x_continuous(breaks = c(10, 32, 100, 320, 562, 1000),
+                labels = c("10", "32", "100", "320", " ", "1000")) +
+  scale_y_continuous(expand = c(.01,0)) +
+  scale_color_manual(values = colrs, name = "Reinforcer") +
+  facet_wrap(~ drug, ncol = 2, scales = "free_y") +
+  labs(x = "Fixed Ratio", y = "Consumption") +
+  theme_bw() +
+  theme(legend.position = c(.8, .11)) +
+  guides(color = guide_legend(ncol = 1))
+
+pltlst <- vector(mode = "list", length = length(unique(monkey$id)))
+for (i in seq_along(unique(monkey$id))) {
+ if (i %in% c(1)) { 
+     margs <- c(.25, 0, -.2, .5) 
+  } else if (i %in% c(2)) {
+    margs <- c(.25, .5, -.2, 0)
+  } else if (i %in% c(3, 5, 7)) {
+    margs <- c(0, 0, -.2, .5)
+  } else if (i %in% c(4, 6, 8)) {
+    margs <- c(0, .5, -.2, 0)
+  } else if (i %in% c(9)) {
+    margs <- c(0, 0, 0, .5)
+  } else if (i %in% c(10)) {
+    margs <- c(0, .5, 0, 0)
+  }
+  pltlst[[i]] <- monkey %>%
+        filter(id %in% unique(monkey$id)[i]) %>%
+        mutate(drug = fct_relevel(drug, c("Cocaine", "Remifentanil", "Methohexital",
+                                            "Ketamine", "Ethanol", "Food", "Saline"))) %>%
+        ggplot(aes(x = x, y = y, group = interaction(id, drug))) +
+        geom_point(aes(color = drug), shape = 21, fill = "white") +
+        geom_line(aes(x = predx, y = predy, 
+                      color = drug), size = .75,
+                  data = monkey_nopool_preds[monkey_nopool_preds$id %in% unique(monkey$id)[i],],
+                  alpha = 1) +
+        geom_point(aes(color = drug), shape = 21, fill = "white") +
+        coord_trans(x = "log10", xlim = c(9, 1000)) +
+        scale_x_continuous(breaks = c(10, 32, 100, 320, 562, 1000),
+                      labels = as.character(c(10, 32, 100, 320, 562, 1000))) +
+        scale_y_continuous(expand = c(.06,0.1)) +
+        # ggsci::scale_color_jama(name = "Reinforcer") +
+        scale_color_manual(values = colrs, name = "Reinforcer") +
+        facet_wrap(~ drug, ncol = 2, scales = "free_y") +
+        labs(x = "", y = "", title = unique(monkey$id)[i]) +
+        theme_bw() +
+        theme(legend.position = "none",
+              strip.text = element_blank(),
+              axis.text = element_blank(),
+              plot.margin = unit(margs,"cm"),
+              title = element_text(size = 8),
+              plot.title = element_text(vjust = -2))
+}
+
+p2 <- gridExtra::grid.arrange(pltlst[[1]], pltlst[[2]], pltlst[[3]], pltlst[[4]], 
+                        pltlst[[5]], pltlst[[6]], pltlst[[7]], pltlst[[8]],
+                        pltlst[[9]], pltlst[[10]], ncol = 2)
+
+p3 <- monkey %>%
+  ggplot(aes(x = x, y = y, group = interaction(id, drug))) +
+  geom_point(aes(color = drug), shape = 21, fill = "white") +
+  geom_line(aes(x = predx, y = predy, color = drug), size = 1,
+            data = monkey_nopool_preds, alpha = 1) +
+  coord_trans(x = "log10", xlim = c(9, 1000)) +
+  scale_x_continuous(breaks = c(10, 32, 100, 320, 562, 1000),
+                labels = as.character(c(10, 32, 100, 320, 562, 1000))) +
+  scale_y_continuous(expand = c(.04,0)) +
+  scale_color_manual(values = colrs, name = "Reinforcer") +
+  facet_wrap(~ id, ncol = 2) +
+  labs(x = "Fixed Ratio", y = "Consumption") +
+  theme_bw() +
+  theme(legend.position = "none")
+```
+
+```{r monkey-nopool-plot, results = 'asis', fig.cap = "Results from the monkey stage one analysis from the two-stage approach. Left panel: Individual predicted curves for each monkey and each reinforcer. Right panel: Nonhuman points and the observed consumption. The predicted lines are fit to each monkey and each reinforcer. Note that the following monkeys and reinforcers were not fit: BU (Ethanol).", fig.height = 9, fig.width = 8}
+
+p3 <- gridExtra::grid.arrange(p1, p2, ncol = 2)
+
+ggsave(filename = "SuppFig3.pdf", plot = p3, device = "pdf", 
+       path = "../plots/", width = 9, height = 8)
+```
+
+### Mixed-effects model
+Figure \@ref(fig:monkey-mixedmodel-plot) displays the results of the mixed-effects
+modeling approach. Both panels show prediction lines from the fixed-effect
+estimates for each of the drugs (thick lines) and the subject-level predictions
+from the random effects (light lines). As shown and demonstrated in the human 
+example, the mixed-effects model provides information (i.e., predictions) at the
+population level (in this case the reinforcer level) as well as at the individual level.
+The results of the mixed-effects model suggest a slightly different interpretation of 
+the reinforcers maintaining the highest and lowest value. This analysis suggests Saline 
+and Food maintained the highest and lowest log($\alpha$), respectively. In this mixed-effects 
+model, we fit each reinforcer as a nominal (categorical) fixed effect and we can use 
+estimated marginal means to compare the values of log($\alpha$) for each reinforcer. 
+Estimated marginal means provide the mean response values for a model’s factors 
+adjusting for any covariates. In the current models, the estimated marginal means 
+are equivalent to the model effects given there are no covariates for which to account. 
+The values are those reported in Table 2.
+
+To determine which reinforcers are statistically significantly different (p < 0.05) 
+from one another, Table 3 shows the pairwise comparisons of log($\alpha$) using false 
+discovery rate p-value adjustments. Only Saline’s log($\alpha$) was statistically significantly 
+higher than all other reinforcers tested. Although Food maintained the lowest 
+log($\alpha$), it was only statistically significantly lower than Remifentanil, Ketamine, 
+and Ethanol.
+
+```{r monkey-mixedmodel, results = 'hide', echo = F, include = F}
+dat_text <- data.frame(label = c("C", "R", "M", "K", "E", "F", "S"),
+                       drug = c("Cocaine", "Remifentanil", "Methohexital",
+                                        "Ketamine", "Ethanol", "Food", "Saline"))
+
+## put letter on top right of facet panels
+monkey_fixef_preds <- monkey_fixef %>%
+  unnest(preds) %>%
+  filter(predx > 0) %>%
+  mutate(drug = fct_relevel(drug, c("Cocaine", "Remifentanil", "Methohexital",
+                                        "Ketamine", "Ethanol", "Food", "Saline")))
+
+monkey_partialpool_preds <- monkey_partialpool %>%
+  unnest(preds) %>%
+  filter(predx > 0) %>%
+  mutate(drug = fct_relevel(drug, c("Cocaine", "Remifentanil", "Methohexital",
+                                        "Ketamine", "Ethanol", "Food", "Saline")))
+
+p1 <- monkey_partialpool_preds %>%
+  ggplot(aes(x = predx, y = predy)) +
+  geom_line(aes(color = drug, group = interaction(id, drug)), 
+            size = 1, alpha = .33) +
+  geom_line(aes(x = predx, y = predy, color = drug),
+            data = monkey_fixef_preds, size = 1.5,
+            linetype = "dashed") +
+  coord_trans(x = "log10", xlim = c(9, 1000)) +
+  scale_x_continuous(breaks = c(10, 32, 100, 320, 562, 1000),
+                labels = c("10", "32", "100", "320", " ", "1000")) +
+  scale_y_continuous(expand = c(.03,0)) +
+  scale_color_manual(values = colrs, name = "Reinforcer") +
+  facet_wrap(~ drug, ncol = 2, scales = "free_y") +
+  labs(x = "Fixed Ratio", y = "Consumption") +
+  theme_bw() +
+  theme(legend.position = c(.8, .09)) +
+  guides(color = guide_legend(ncol = 1))
+  
+p1 <- p1 + geom_label(data = dat_text, 
+               mapping = aes(x = Inf, y = Inf, label = label),
+               hjust = 1,
+               vjust = 1)
+
+
+pltlst <- vector(mode = "list", length = length(unique(monkey$id)))
+for (i in seq_along(unique(monkey$id))) {
+ if (i %in% c(1)) { 
+     margs <- c(.25, 0, -.2, .5) 
+  } else if (i %in% c(2)) {
+    margs <- c(.25, .5, -.2, 0)
+  } else if (i %in% c(3, 5, 7)) {
+    margs <- c(-.25, 0, -.2, .5)
+  } else if (i %in% c(4, 6, 8)) {
+    margs <- c(-.25, .5, -.2, 0)
+  } else if (i %in% c(9)) {
+    margs <- c(-.25, 0, 0, .5)
+  } else if (i %in% c(10)) {
+    margs <- c(-.25, .5, 0, 0)
+  }
+  pltlst[[i]] <- monkey_partialpool_preds %>%
+        filter(id %in% unique(monkey$id)[i]) %>%
+        mutate(drug = fct_relevel(drug, c("Cocaine", "Remifentanil", "Methohexital",
+                                        "Ketamine", "Ethanol", "Food", "Saline"))) %>%
+        ggplot(aes(x = predx, y = predy))+
+        geom_line(aes(color = drug, group = interaction(id, drug)), 
+                  size = .5, alpha = .75) +
+        geom_line(aes(x = predx, y = predy, color = drug),
+            data = monkey_fixef_preds, size = .5,
+            linetype = "dashed") +
+        geom_point(aes(x = x, y = y, color = drug), 
+                   shape = 21, 
+                   fill = alpha("white", .75),
+                   data = monkey[monkey$id %in% unique(monkey$id)[i],]) +
+        coord_trans(x = "log10", xlim = c(9, 1000)) +
+        scale_x_continuous(breaks = c(10, 32, 100, 320, 562, 1000),
+                      labels = as.character(c(10, 32, 100, 320, 562, 1000))) +
+        scale_y_continuous(expand = c(.1,0.1)) +
+        scale_color_manual(values = colrs, name = "Reinforcer") +
+        facet_wrap(~ drug, ncol = 2, scales = "free_y") +
+        labs(x = "", y = "", title = unique(monkey$id)[i]) +
+        theme_bw() +
+        theme(legend.position = "none",
+              strip.text = element_blank(),
+              axis.text = element_blank(),
+              plot.margin = unit(margs,"cm"),
+              title = element_text(size = 8),
+              plot.title = element_text(vjust = -2))
+  pltlst[[i]] <- pltlst[[i]] + geom_label(data = dat_text, 
+                                          size = 2.5,
+                                          label.padding = unit(.1, "lines"),
+               mapping = aes(x = Inf, y = Inf, label = label),
+               hjust = 1,
+               vjust = 1)
+}
+
+p2 <- gridExtra::grid.arrange(pltlst[[1]], pltlst[[2]], pltlst[[3]], pltlst[[4]], 
+                        pltlst[[5]], pltlst[[6]], pltlst[[7]], pltlst[[8]],
+                        pltlst[[9]], pltlst[[10]], ncol = 2)
+
+p3 <- monkey_partialpool_preds %>%
+  ggplot(aes(x = predx, y = predy))+
+  geom_line(aes(color = drug, group = interaction(id, drug)), size = 1, alpha = .75) +
+  geom_point(aes(x = x, y = y, color = drug), data = monkey,
+             shape = 21, fill = "white") +
+  coord_trans(x = "log10", xlim = c(9, 1000),
+              ylim = c(0, 300)) +
+  scale_x_continuous(breaks = c(10, 32, 100, 320, 562, 1000),
+                labels = as.character(c(10, 32, 100, 320, 562, 1000))) +
+  scale_y_continuous(expand = c(.01,0)) +
+  facet_wrap(~ id, ncol = 2) +
+  labs(x = "Fixed Ratio", y = "Consumption") +
+  theme_bw() +
+  theme(legend.position = "none")
+```
+
+```{r monkey-mixedmodel-plot, results = 'asis', fig.cap = "Monkey mixed-effects model regression: Left panel: Thick colored lines indicate the fixed effect predictions from the mixed model, whereas the thinner colored lines show individual predicted lines as extracted from the random effects. Note here the mixed-effects model provides an overall predicted line for each drug as well as individual predictions, both which leverage data from all participants and all conditions. Right panel: Individual monkeys and their consumption. The colored lines show predicted values from participants' random effects, which deviate from the overall group means (thick colored lines in left panel).", fig.height = 9, fig.width = 8, include = T}
+
+p3 <- gridExtra::grid.arrange(p1, p2, ncol = 2)
+
+ggsave(filename = "Fig5.pdf", plot = p3, device = "pdf", 
+       path = "../plots/", width = 9, height = 8)
+```
+
+```{r monkey-coefs-tab, results = 'asis'}
+knitr::kable(monkey_coefs, digits = 4, caption = "Comparison of Fixed Effect
+             Parameter Estimates from Modeling Approaches for Nonhuman Data",
+             escape = FALSE, longtable = T)
+```
+
+```{r emmeans-alpha, results = 'asis'}
+em_alpha$emmeans %>%
+  as.data.frame(.) %>%
+  arrange(emmean) %>%
+  rename(., "Reinforcer" = "drug",
+         "Estimated Marginal Mean" = "emmean",
+         "SE" = "SE", "d.f." = "df",
+         "Lower CI" = "lower.CL", "Upper CI" = "upper.CL") %>%
+knitr::kable(., digits = 4, caption = "Estimated Marginal Means of log($\\alpha$)",
+             escape = FALSE)
+```
+
+```{r emmeans-alpha-compare, results = 'asis'}
+em_alpha$contrasts %>%
+  as.data.frame(.) %>%
+  rename(., "Contrast" = "contrast",
+         "Estimate (difference)" = "estimate",
+         "SE" = "SE", "d.f." = "df", 
+         "T Value" = "t.ratio", "P Value" = "p.value") %>%
+knitr::kable(., digits = 4, caption = "Comparisons of log($\\alpha$)",
+             escape = FALSE)
+```
+
+## Other Considerations
+Beyond the introduction and basic concepts laid out here in the re-analysis
+of a human Alcohol Purchase Task dataset and nonhuman self-administration dataset, there are
+additional considerations for fitting mixed-effects models to behavioral
+economic operant demand data. One consideration is the determination
+of convergence criteria. Convergence criteria can be relatively lenient (i.e.,
+finding "good enough" estimates and looking no further after the criteria is met) 
+or they can be relatively strict. With data that follow the typical exponential 
+decay function of demand (i.e., systematic), convergence can more easily be obtained under strict 
+criteria. With data that are relatively more "unsystematic," strict criteria may
+not result in convergence and these criteria may need to be relaxed. Another reason
+convergence may not be achieved is because starting values may be too far away
+from the optimal solution. This problem is also present in traditional approaches
+to fitting demand curve data (e.g., fit-to-means, two-stage) and nonlinear modeling
+in general. If convergence issues are encountered, we suggest relaxing the 
+convergence criteria until a solution is determined. Then the estimates from 
+this model may be used as starting values for another model where convergence 
+criteria are tightened once more. 
+
+Finally, mixed-effects models may be solved using Bayesian methods and Markov 
+Chain Monte Carlo (MCMC) as opposed to maximum likelihood estimation. Methods such as 
+these have been successfully applied to behavioral economic demand data [@ho2016bayesian].
+MCMC has the added benefits of producing empirical posterior (or under frequentist 
+assumptions, sampling) distributions for all parameters in the model and does 
+not suffer from certain convergence problems with maximum likelihood estimation 
+in small samples.
+
+# Conclusion
+Mixed-effects models are becoming a more popular means by which to analyze complex
+behavioral economic demand data. Although this modeling technique is more complicated
+than traditional approaches to analysis (i.e., fit-to-means, two-stage), our goal
+here is to make the motivation, interpretation, and execution of the mixed-effects
+modeling technique more accessible for the analysis of demand data. In this paper 
+we have used two datasets (i.e., a hypothetical purchase task, nonhuman animal 
+self-administration) to 1) illustrate
+the traditional approaches to demand modeling, 2) discuss the relative benefits and
+limitations of these approaches, 3) provide an overview of the mixed-effects
+framework, 4) illustrate the results of this framework, and 5) describe how results
+from the mixed-effects modeling technique correspond with the traditional methods. 
+In order to facilitate execution of these techniques, we have made a fully reproducible
+document available at the corresponding author's GitHub page as a repository. There,
+this code can be inspected, executed, and adapted for researchers' own endeavors. 
+
+# References
+
+<div id="refs"></div>
+
+\newpage
+# Appendix
+
+We expand this in matrix notation to describe how the individual estimates $Q_{0_{i}}$ 
+and $\alpha_{i}$ are the sum of the fixed effects $\beta_{1}$ and $\beta_{2}$ and
+random effects $b_{1i}$ and $b_{2i}$. The random effects $\boldsymbol{b_{i}}$ are distributed
+based on a multivariate normal ($MN$) distribution with mean 0 and variance equal
+to $\varPsi$. Because the $\boldsymbol{b_{i}}$ random effects index the individual, 
+we assume the sampling distribution of these two effects may be correlated to 
+some extent with each other, which is shown in the expansion of $\varPsi$. 
+
+\[
+\left(\begin{array}{c}
+Q_{0_{i}}\\
+\alpha_{i}
+\end{array}\right)=\left(\begin{array}{c}
+\beta_{1}\\
+\beta_{2}
+\end{array}\right)+\left(\begin{array}{c}
+b_{1i}\\
+b_{2i}
+\end{array}\right)=\mathbf{\boldsymbol{\beta}+b_{i},b_{i}}\sim MN(0,\varPsi),\varepsilon_{ij}\sim N(0,\sigma^{2}f(p_{j})),
+\]
+
+and 
+
+\[
+\varPsi=\left(\begin{array}{cc}
+\sigma_{1}^{2} & \sigma_{12}\\
+\sigma_{12} & \sigma_{2}^{2}
+\end{array}\right)
+\]
+
+In essence, the fixed effects $\beta_{1}$ and $\beta_{2}$ are analogous
+to the parameters we obtain from the fit-to-mean approach and the random effects 
+$b_{1i}$ and $b_{2i}$ are analogous to those we obtain from the two-stage approach.
+Here the difference is we leverage all the available data; in other words, how does the sample
+as a whole respond (i.e., fixed effects) and how do individuals respond _relative_ to 
+the sample (i.e., random effects). 
