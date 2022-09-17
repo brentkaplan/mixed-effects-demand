@@ -256,13 +256,26 @@ apt_fittogroup_fixed_sum <- tidy(apt_pool) %>%
   mutate(model = "Fit to Group")
 
 ### two stage approach
+## needs workaround because any datasets that do not converge results
+## in a logical NA instead of a tibble
+## create two replacement tibbles for any NAs; tidied and glanced
+## and use these for the `otherwise` argument in the next code block
+tidied_na <- tibble(`term` = c("q0", "alpha"), `estimate` = c(NA, NA), 
+                    `std.error` = c(NA, NA), `statistic` = c(NA, NA), 
+                    `p.value` = c(NA, NA))
+
+glanced_na <- tibble(`sigma` = NA, `isConv` = NA, `finTol` = NA, 
+                     `logLik` = NA, `AIC` = NA, `BIC` = NA, 
+                     `deviance` = NA, `df.residual` = NA, 
+                     `nobs` = NA)
+
 ## two stage (no pool) approach retaining coefficients and predictions
 apt_nopool <- apt_long %>%
   nest(data = c(x, y)) %>%
   group_by(id) %>%
   mutate(fit = map(data, nls_fit, kval),
-         tidied = map(fit, possibly(tidy, otherwise = NA_real_)),
-         glanced = map(fit, possibly(glance, otherwise = NA_real_))) %>%
+         tidied = map(fit, possibly(tidy, otherwise = tidied_na)),
+         glanced = map(fit, possibly(glance, otherwise = glanced_na))) %>%
   unnest(cols = c("data")) %>%
   filter(x %in% 0) %>%
   unnest(cols = "tidied")
@@ -507,8 +520,10 @@ p2 <- apt_nopool_preds_subset %>%
 
 p3 <- gridExtra::grid.arrange(p1, p2, nrow = 2)
 
-ggsave(filename = "Fig1.pdf", plot = p3, device = "pdf", 
+ggsave(filename = "Fig1.pdf", plot = p3, device = "pdf",
        path = "../plots/", width = 5, height = 7)
+# ggsave(filename = "Fig1.eps", plot = p3, device = cairo_ps, 
+#        path = "../plots/", width = 5, height = 7)
 ```
 
 An in-depth discussion of the various metrics the demand curve provides and their 
@@ -787,7 +802,9 @@ p1 <- pooled %>%
   scale_y_continuous(expand = c(.01,0)) +
  
   labs(x = "Price per Drink ($USD)", y = "Drinks Purchased") +
-  theme_bw()
+  theme_bw() +
+  theme(axis.text = element_text(color = "black"),
+        axis.ticks = element_line(color = "black"))
 
 ## make faceted plot 2 with sampled data sets overlaying fit to group curve
 p2 <- apt_nopool %>%
@@ -818,14 +835,18 @@ p2 <- apt_nopool %>%
   scale_y_continuous(expand = c(.05,0.05)) +
   facet_wrap(~ id, ncol = 3) +
   labs(x = "Price per Drink ($USD)", y = "Drinks Purchased") +
-  theme_bw()
+  theme_bw() +
+  theme(axis.text = element_text(color = "black"),
+        axis.ticks = element_line(color = "black"))
 
 ## side by side plot
 p3 <- gridExtra::grid.arrange(p1, p2, ncol = 2)
 
 ## 
-ggsave(filename = "Fig2.pdf", plot = p3, device = "pdf", 
-       path = "../plots/", width = 9, height = 8)
+# ggsave(filename = "Fig2.pdf", plot = p3, device = "pdf",
+#        path = "../plots/", width = 9, height = 8)
+ggsave(filename = "Fig2.eps", plot = p3, device = cairo_ps,
+       path = "../plots/", width = 8, height = 6)
 ```
 
 #### Benefits and limitations of the Fit-to-Group Approach
@@ -917,7 +938,9 @@ p1 <- apt_nopool_preds %>%
                 labels = c("0.1", "0.1", "1", "10")) +
   scale_y_continuous(expand = c(.01,0)) +
   labs(x = "Price per Drink ($USD)", y = "Drinks Purchased") +
-  theme_bw()
+  theme_bw() +
+  theme(axis.text = element_text(color = "black"),
+        axis.ticks = element_line(color = "black"))
 
 ## make plot 2 with data points and subset predicted lines
 p2 <- apt_nopool_preds %>%
@@ -935,14 +958,18 @@ p2 <- apt_nopool_preds %>%
   scale_y_continuous(expand = c(.05,0.05)) +
   facet_wrap(~ id, ncol = 3) +
   labs(x = "Price per Drink ($USD)", y = "Drinks Purchased") +
-  theme_bw()
+  theme_bw() +
+  theme(axis.text = element_text(color = "black"),
+        axis.ticks = element_line(color = "black"))
 
 ## side by side plot
 p3 <- gridExtra::grid.arrange(p1, p2, ncol = 2)
 
 ##
-ggsave(filename = "Fig3.pdf", plot = p3, device = "pdf", 
-       path = "../plots/", width = 9, height = 8)
+# ggsave(filename = "Fig3.pdf", plot = p3, device = "pdf",
+#        path = "../plots/", width = 9, height = 8)
+ggsave(filename = "Fig3.eps", plot = p3, device = cairo_ps,
+       path = "../plots/", width = 8, height = 6)
 ```
 
 #### Benefits and limitations of the Two-Stage Approach
@@ -1154,7 +1181,9 @@ p1 <- newavg %>%
                 labels = c("0.1", "0.1", "1", "10")) +
   scale_y_continuous(expand = c(.01,0)) +
   labs(x = "Price per Drink ($USD)", y = "Drinks Purchased") +
-  theme_bw()
+  theme_bw() +
+  theme(axis.text = element_text(color = "black"),
+        axis.ticks = element_line(color = "black"))
 
 ## make plot 2 showing the predicted lines from the random effects
 ## faceted for the subsets
@@ -1175,14 +1204,18 @@ p2 <- newvary %>%
   scale_y_continuous(expand = c(.05,0.05)) +
   facet_wrap(~ id, ncol = 3) +
   labs(x = "Price per Drink ($USD)", y = "Drinks Purchased") +
-  theme_bw()
+  theme_bw() +
+  theme(axis.text = element_text(color = "black"),
+        axis.ticks = element_line(color = "black"))
 
 ## side by side plot
 p3 <- gridExtra::grid.arrange(p1, p2, ncol = 2)
 
 ##
-ggsave(filename = "Fig4.pdf", plot = p3, device = "pdf", 
-       path = "../plots/", width = 9, height = 8)
+# ggsave(filename = "Fig4.pdf", plot = p3, device = "pdf",
+#        path = "../plots/", width = 9, height = 8)
+ggsave(filename = "Fig4.eps", plot = p3, device = cairo_ps,
+       path = "../plots/", width = 8, height = 6)
 ```
 
 ```{r fixed-summary-tab, results = 'hide', echo = F, include = F}
@@ -1253,8 +1286,10 @@ p2 <- apt_fixed_sum %>%
 
 ```{r fixed-summary-plot, results = 'asis', fig.cap = "Point estimates and standard errors for log($Q_{0}$) (top panel) and log($\\alpha$) (bottom panel) from each of the three fitting methods. Notice how for this dataset, the fit-to-group approach (circles) tend to underestimate standard errors whereas the two-stage approach (squares) standard errors are larger. The mixed-effects modeling approach is shown in diamonds.", fig.width=6, fig.height=8}
 p3 <- gridExtra::grid.arrange(p1, p2, nrow = 2)
-ggsave(filename = "Fig5R.pdf", plot = p3, device = "pdf",
-       path = "../plots/", width = 6, height = 8)
+# ggsave(filename = "Fig5.pdf", plot = p3, device = "pdf",
+#        path = "../plots/", width = 6, height = 8)
+ggsave(filename = "Fig5.eps", plot = p3, device = cairo_ps,
+       path = "../plots/", width = 5, height = 7)
 ```
 
 Figure \@ref(fig:fixed-summary-plot) displays the estimates and the standard 
@@ -1344,8 +1379,10 @@ p2 <- apt_nopool %>%
 
 p3 <- gridExtra::grid.arrange(p1, p2, nrow = 1)
 
-ggsave(filename = "SuppFig1.pdf", plot = p3, device = "pdf", 
+ggsave(filename = "SuppFig1.pdf", plot = p3, device = "pdf",
        path = "../plots/", width = 9, height = 8)
+# ggsave(filename = "SuppFig1.eps", plot = p3, device = cairo_ps,
+#        path = "../plots/", width = 9, height = 8)
 ```
 
 Up to this point, we have demonstrated how the mixed-effects model can be applied
@@ -1791,9 +1828,10 @@ p2 <- gridExtra::grid.arrange(pltlst[[1]], pltlst[[2]], pltlst[[3]], pltlst[[4]]
 
 p3 <- gridExtra::grid.arrange(p1, p2, ncol = 2)
 
-ggsave(filename = "SuppFig2.pdf", plot = p3, device = "pdf", 
+ggsave(filename = "SuppFig2.pdf", plot = p3, device = "pdf",
        path = "../plots/", width = 9, height = 8)
-
+# ggsave(filename = "SuppFig2.eps", plot = p3, device = cairo_ps, 
+#        path = "../plots/", width = 9, height = 8)
 ```
 
 ```{r monkey-pool-tab, results = 'asis', include = F, eval = F}
@@ -1903,8 +1941,10 @@ p2 <- gridExtra::grid.arrange(pltlst[[1]], pltlst[[2]], pltlst[[3]], pltlst[[4]]
 
 p3 <- gridExtra::grid.arrange(p1, p2, ncol = 2)
 
-ggsave(filename = "SuppFig3.pdf", plot = p3, device = "pdf", 
+ggsave(filename = "SuppFig3.pdf", plot = p3, device = "pdf",
        path = "../plots/", width = 9, height = 8)
+# ggsave(filename = "SuppFig3.eps", plot = p3, device = cairo_ps, 
+#        path = "../plots/", width = 9, height = 8)
 ```
 
 ### Mixed-effects model
@@ -1977,7 +2017,9 @@ p1 <- monkey_partialpool_preds %>%
   facet_wrap(~ drug, ncol = 2, scales = "free_y") +
   labs(x = "Fixed Ratio", y = "Consumption") +
   theme_bw() +
-  theme(legend.position = c(.8, .09)) +
+  theme(legend.position = c(.8, .09), 
+        axis.text = element_text(color = "black"),
+        axis.ticks = element_line(color = "black")) +
   guides(color = guide_legend(ncol = 1))
   
 p1 <- p1 + geom_label(data = dat_text, 
@@ -2028,7 +2070,8 @@ for (i in seq_along(unique(monkey$id))) {
               axis.text = element_blank(),
               plot.margin = unit(margs,"cm"),
               title = element_text(size = 8),
-              plot.title = element_text(vjust = -2))
+              plot.title = element_text(vjust = -2),
+              axis.ticks = element_line(color = "black"))
   pltlst[[i]] <- pltlst[[i]] + geom_label(data = dat_text, 
                                           size = 2.5,
                                           label.padding = unit(.1, "lines"),
@@ -2047,7 +2090,9 @@ p2 <- gridExtra::grid.arrange(pltlst[[1]], pltlst[[2]], pltlst[[3]], pltlst[[4]]
 
 p3 <- gridExtra::grid.arrange(p1, p2, ncol = 2)
 
-ggsave(filename = "Fig7R.pdf", plot = p3, device = "pdf", 
+# ggsave(filename = "Fig7.pdf", plot = p3, device = "pdf",
+#        path = "../plots/", width = 9, height = 8)
+ggsave(filename = "Fig7.eps", plot = p3, device = cairo_ps,
        path = "../plots/", width = 9, height = 8)
 ```
 
@@ -2119,8 +2164,10 @@ p2 <- monkey_coefs %>%
 ```{r monkey-coefs-plot, results = 'asis', fig.cap = "Point estimates and standard errors for log($Q_{0}$) (top panel) and log($\\alpha$) (bottom panel) from each of the three fitting methods for each reinforcer. Results of the mixed-effects modeling approach (diamonds) are consistent with and provide more accurate standard errors compared to the fit-to-group (circles) and two-stage (squares) approaches.", fig.height = 8, fig.width = 9, include = T}
 p3 <- gridExtra::grid.arrange(p1, p2, nrow = 2)
 
-ggsave(filename = "Fig6R.pdf", plot = p3, device = "pdf", 
-       path = "../plots/", width = 9, height = 8)
+# ggsave(filename = "Fig6.pdf", plot = p3, device = "pdf",
+#        path = "../plots/", width = 9, height = 8)
+ggsave(filename = "Fig6.eps", plot = p3, device = cairo_ps,
+       path = "../plots/", width = 9, height = 7.5)
 ```
 
 
